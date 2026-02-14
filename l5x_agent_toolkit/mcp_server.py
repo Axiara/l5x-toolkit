@@ -5,6 +5,10 @@ Exposes validated L5X file manipulation tools via the Model Context Protocol,
 allowing any MCP-compatible AI client (Claude Desktop, Claude Code, etc.) to
 perform hyper-accurate PLC project modifications through natural language.
 
+This server uses consolidated, batch-capable tools to minimise round-trips.
+Most mutation endpoints accept a JSON array of operations so that multiple
+changes can be applied in a single call.
+
 Usage:
     python -m l5x_agent_toolkit.mcp_server
     # or
@@ -13,11 +17,11 @@ Usage:
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import os
 import sys
-from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
 
@@ -54,9 +58,12 @@ mcp = FastMCP(
     "L5X Agent Toolkit",
     instructions=(
         "Validated tools for reading and modifying Rockwell Automation "
-        "Studio 5000 L5X project files. The AI never touches raw XML -- "
-        "every operation produces structurally correct output. "
-        "Always call load_project first before using any other tool."
+        "Studio 5000 L5X project files.  The AI never touches raw XML -- "
+        "every operation produces structurally correct output.\n\n"
+        "Always call load_project first before using any other tool.\n\n"
+        "Batch-capable tools (manage_tags, update_tags, manage_rungs, "
+        "manage_alarms) accept a JSON array of operations so you can "
+        "create, modify, or delete multiple items in a single call."
     ),
 )
 
@@ -106,6 +113,18 @@ def _normalize_path(raw_path: str) -> str:
     return path
 
 
+def _auto_convert_value(value_str: str, data_type: str):
+    """Convert a string value to the appropriate Python type for a tag."""
+    if data_type in ('REAL', 'LREAL'):
+        return float(value_str)
+    if data_type == 'BOOL':
+        return 1 if value_str.lower() in ('1', 'true', 'yes') else 0
+    try:
+        return int(value_str)
+    except ValueError:
+        return float(value_str)
+
+
 # ===================================================================
 # 1. Project Management
 # ===================================================================
@@ -151,23 +170,23 @@ def load_project(file_path: str) -> str:
                 f"AOIs: {summary['aoi_count']}, UDTs: {summary['udt_count']}"
             )
             lines.append(
-                "Use get_aoi_info/get_aoi_parameters to inspect. "
-                "To use this AOI, load a full project and use import_aoi."
+                "Use get_entity_info(entity='aoi') to inspect. "
+                "To use this AOI, load a full project and use import_component."
             )
         elif target_type == 'DataType':
             lines.append(
                 f"This is a UDT export file. UDTs: {summary['udt_count']}"
             )
             lines.append(
-                "Use get_udt_info/get_udt_members to inspect. "
-                "To use this UDT, load a full project and use import_udt."
+                "Use get_entity_info(entity='udt') to inspect. "
+                "To use this UDT, load a full project and use import_component."
             )
         elif target_type == 'Module':
             lines.append(
                 f"This is a Module export file. Modules: {summary['module_count']}"
             )
             lines.append(
-                "To use this module, load a full project and use import_module."
+                "To use this module, load a full project and use import_component."
             )
         elif target_type == 'Rung':
             target_count = _project.root.get('TargetCount', '?')
@@ -225,7 +244,7 @@ def format_project() -> str:
     indented with two spaces relative to their parent.  Call this before
     ``save_project`` to produce a cleanly formatted output file.
 
-    This is optional — Studio 5000 does not require pretty formatting,
+    This is optional -- Studio 5000 does not require pretty formatting,
     but it makes the L5X file much easier to read and diff.
     """
     prj = _require_project()
@@ -267,71 +286,213 @@ def get_project_summary() -> str:
 
 
 # ===================================================================
-# 2. Query Tools
+# 2. Query Tools (consolidated)
 # ===================================================================
 
 @mcp.tool()
-def list_programs() -> str:
-    """List all program names in the project."""
-    prj = _require_project()
-    return json.dumps(prj.list_programs())
+def query_project(
+    entity: str = "all",
+    scope: str = "",
+    program_name: str = "",
+    name_filter: str = "",
+) -> str:
+    """Query project contents -- programs, tags, modules, AOIs, UDTs, tasks.
 
-
-@mcp.tool()
-def list_routines(program_name: str) -> str:
-    """List all routines in a program with their types (RLL, ST, etc.).
-
-    Args:
-        program_name: Name of the program.
-    """
-    prj = _require_project()
-    return json.dumps(prj.list_routines(program_name))
-
-
-@mcp.tool()
-def list_controller_tags() -> str:
-    """List all controller-scope tags with name, data type, and description."""
-    prj = _require_project()
-    return json.dumps(prj.list_controller_tags())
-
-
-@mcp.tool()
-def list_program_tags(program_name: str) -> str:
-    """List all tags in a specific program.
+    Replaces the former list_programs, list_routines, list_controller_tags,
+    list_program_tags, list_modules, list_aois, list_udts, list_tasks tools.
+    Use entity='all' to get a full inventory in one call.
 
     Args:
-        program_name: Name of the program.
+        entity: What to list. One of: 'all', 'programs', 'routines',
+                'tags', 'modules', 'aois', 'udts', 'tasks'.
+                'all' returns a combined inventory.
+        scope: For tags: 'controller', 'program', or '' (both scopes).
+               Ignored for non-tag entities.
+        program_name: Required for 'routines'. For 'tags', filters to a
+                      specific program when scope includes 'program'.
+        name_filter: Optional glob pattern to filter names (e.g. 'Motor*').
     """
     prj = _require_project()
-    return json.dumps(prj.list_program_tags(program_name))
+    try:
+        result: dict = {}
+
+        entities = (
+            ["programs", "tags", "modules", "aois", "udts", "tasks"]
+            if entity == "all"
+            else [entity]
+        )
+
+        for ent in entities:
+            if ent == "programs":
+                result["programs"] = prj.list_programs()
+            elif ent == "routines":
+                if not program_name:
+                    return "Error: program_name is required when entity='routines'."
+                result["routines"] = prj.list_routines(program_name)
+            elif ent == "tags":
+                tags: list = []
+                if scope in ("controller", ""):
+                    for t in prj.list_controller_tags():
+                        t["scope"] = "controller"
+                        tags.append(t)
+                if scope in ("program", ""):
+                    if program_name:
+                        for t in prj.list_program_tags(program_name):
+                            t["scope"] = "program"
+                            t["program"] = program_name
+                            tags.append(t)
+                    elif scope == "" or scope == "program":
+                        for p in prj.list_programs():
+                            for t in prj.list_program_tags(p):
+                                t["scope"] = "program"
+                                t["program"] = p
+                                tags.append(t)
+                result["tags"] = tags
+            elif ent == "modules":
+                result["modules"] = prj.list_modules()
+            elif ent == "aois":
+                result["aois"] = prj.list_aois()
+            elif ent == "udts":
+                result["udts"] = prj.list_udts()
+            elif ent == "tasks":
+                result["tasks"] = prj.list_tasks()
+            else:
+                return (
+                    f"Error: Unknown entity '{ent}'. "
+                    f"Choose from: all, programs, routines, tags, modules, "
+                    f"aois, udts, tasks."
+                )
+
+        # Apply name_filter if provided
+        if name_filter:
+            for key in result:
+                items = result[key]
+                if isinstance(items, list):
+                    result[key] = [
+                        item for item in items
+                        if fnmatch.fnmatch(
+                            (item.get("name", item)
+                             if isinstance(item, dict) else item),
+                            name_filter,
+                        )
+                    ]
+
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return f"Error querying project: {e}"
 
 
 @mcp.tool()
-def list_modules() -> str:
-    """List all I/O modules with catalog numbers and parent info."""
+def get_entity_info(
+    entity: str,
+    name: str,
+    scope: str = "controller",
+    program_name: str = "",
+    routine_name: str = "",
+    include: str = "",
+) -> str:
+    """Get detailed information about a specific entity.
+
+    Replaces the former get_tag_info, find_tag, get_tag_member_value,
+    get_aoi_info, get_aoi_parameters, get_udt_info, get_udt_members tools.
+
+    Args:
+        entity: Entity type -- 'tag', 'aoi', 'udt', 'rung'.
+        name: Entity name. For rungs, use the zero-based rung number.
+              For tag member access, use dot/bracket notation on the name
+              (e.g. 'Timer1.PRE', 'Array[0]').
+        scope: For tags: 'controller', 'program', or '' (search all scopes).
+        program_name: Required when scope is 'program', or for rung queries.
+        routine_name: Required for rung queries.
+        include: Comma-separated extras to include in the response:
+                 For tags:  'value', 'references', 'alarm_conditions'
+                 For AOIs:  'parameters'
+                 For UDTs:  'members'
+                 Multiple values can be combined: 'parameters,members'
+    """
     prj = _require_project()
-    return json.dumps(prj.list_modules())
+    try:
+        include_set = {s.strip() for s in include.split(",") if s.strip()}
+        prog = program_name if program_name else None
 
+        if entity == "tag":
+            # Check if name contains a member path (dot or bracket)
+            member_path = ""
+            base_name = name
+            if '.' in name:
+                parts = name.split('.', 1)
+                base_name = parts[0]
+                member_path = parts[1]
+            elif '[' in name:
+                idx = name.index('[')
+                base_name = name[:idx]
+                member_path = name[idx:]
 
-@mcp.tool()
-def list_aois() -> str:
-    """List all Add-On Instruction definitions with names and revisions."""
-    prj = _require_project()
-    return json.dumps(prj.list_aois())
+            # If scope is empty, search all scopes
+            if scope == "":
+                info = _tags.find_tag(prj, base_name)
+            else:
+                info = _tags.get_tag_info(
+                    prj, base_name, scope=scope, program_name=prog,
+                )
 
+            # Add member value if a member path was specified
+            if member_path:
+                effective_scope = info.get("scope", scope) or scope
+                effective_prog = info.get("program") or prog
+                member_val = prj.get_tag_member_value(
+                    base_name, member_path,
+                    scope=effective_scope,
+                    program_name=effective_prog,
+                )
+                info["member_path"] = member_path
+                info["member_value"] = member_val
 
-@mcp.tool()
-def list_udts() -> str:
-    """List all User-Defined Types with names and member counts."""
-    prj = _require_project()
-    return json.dumps(prj.list_udts())
+            # Include extras
+            if "references" in include_set:
+                info["references"] = prj.find_tag_references(base_name)
+            if "alarm_conditions" in include_set:
+                effective_scope = info.get("scope", scope) or scope
+                effective_prog = info.get("program") or prog
+                info["alarm_conditions"] = _tags.get_tag_alarm_conditions(
+                    prj, base_name,
+                    scope=effective_scope,
+                    program_name=effective_prog,
+                )
 
+            return json.dumps(info, indent=2)
 
-@mcp.tool()
-def list_tasks() -> str:
-    """List all tasks with type, priority, rate, and scheduled programs."""
-    prj = _require_project()
-    return json.dumps(prj.list_tasks())
+        elif entity == "aoi":
+            info = _aoi.get_aoi_info(prj, name)
+            if "parameters" in include_set:
+                info["parameters_detail"] = _aoi.get_aoi_parameters(prj, name)
+            return json.dumps(info, indent=2)
+
+        elif entity == "udt":
+            info = _udt.get_udt_info(prj, name)
+            if "members" in include_set:
+                info["members_detail"] = _udt.get_udt_members(prj, name)
+            return json.dumps(info, indent=2)
+
+        elif entity == "rung":
+            if not program_name or not routine_name:
+                return "Error: program_name and routine_name are required for entity='rung'."
+            all_rungs = prj.get_all_rungs(program_name, routine_name)
+            try:
+                rung_num = int(name)
+            except ValueError:
+                return f"Error: For entity='rung', name must be a rung number (got '{name}')."
+            if rung_num < 0 or rung_num >= len(all_rungs):
+                return f"Error: Rung {rung_num} out of range (0-{len(all_rungs) - 1})."
+            return json.dumps(all_rungs[rung_num], indent=2)
+
+        else:
+            return (
+                f"Error: Unknown entity '{entity}'. "
+                f"Choose from: tag, aoi, udt, rung."
+            )
+    except Exception as e:
+        return f"Error getting entity info: {e}"
 
 
 @mcp.tool()
@@ -347,398 +508,241 @@ def get_all_rungs(program_name: str, routine_name: str) -> str:
 
 
 @mcp.tool()
-def get_tag_info(
-    name: str,
-    scope: str = "controller",
-    program_name: str = "",
-) -> str:
-    """Get detailed information about a specific tag.
+def find_tag_references(tag_name: str) -> str:
+    """Find all locations where a tag is referenced in rung text or ST code.
 
-    Returns name, data type, dimensions, description, value, radix, etc.
+    Returns a list of {program, routine, rung, text} for each reference.
 
     Args:
-        name: Tag name.
-        scope: 'controller' or 'program'.
-        program_name: Required when scope is 'program'.
+        tag_name: Tag name to search for.
     """
     prj = _require_project()
-    prog = program_name if program_name else None
-    info = _tags.get_tag_info(prj, name, scope=scope, program_name=prog)
-    return json.dumps(info)
-
-
-@mcp.tool()
-def find_tag(name: str) -> str:
-    """Find a tag by name across all scopes (controller and every program).
-
-    Searches controller scope first, then all program scopes. Returns
-    full tag details including which scope the tag was found in and all
-    member values for structured types (UDTs, TIMER, COUNTER, etc.).
-
-    Use this when you don't know which scope a tag belongs to.
-
-    Args:
-        name: Tag name to search for.
-    """
-    prj = _require_project()
-    info = _tags.find_tag(prj, name)
-    return json.dumps(info)
-
-
-@mcp.tool()
-def get_tag_member_value(
-    name: str,
-    member_path: str,
-    scope: str = "controller",
-    program_name: str = "",
-) -> str:
-    """Read a specific member value from a structured or array tag.
-
-    Use dot notation for structure members (e.g. 'PRE', 'Status.Active')
-    and brackets for array indices (e.g. '[0]', '[2].EN').
-
-    Args:
-        name: Tag name.
-        member_path: Path to the member (e.g. 'PRE', '[0]', '[2].EN').
-        scope: 'controller' or 'program'.
-        program_name: Required when scope is 'program'.
-    """
-    prj = _require_project()
-    prog = program_name if program_name else None
-    value = prj.get_tag_member_value(name, member_path, scope=scope,
-                                     program_name=prog)
-    return json.dumps({"member": f"{name}.{member_path}", "value": value})
+    try:
+        refs = prj.find_tag_references(tag_name)
+        return json.dumps(refs)
+    except Exception as e:
+        return f"Error finding references: {e}"
 
 
 # ===================================================================
-# 3. Tag Operations
+# 3. Tag Operations (consolidated)
 # ===================================================================
 
 @mcp.tool()
-def create_tag(
-    name: str,
-    data_type: str,
-    scope: str = "controller",
-    program_name: str = "",
-    dimensions: str = "",
-    description: str = "",
-    radix: str = "",
-    tag_class: str = "",
-) -> str:
-    """Create a new tag in the project.
-
-    Supports all L5X data types: BOOL, SINT, INT, DINT, REAL, LREAL,
-    STRING, TIMER, COUNTER, CONTROL, plus any UDT or AOI defined in the
-    project. For arrays, specify dimensions (e.g. '10' or '3,4').
-
-    Args:
-        name: Tag name (letters, digits, underscore; max 40 chars).
-        data_type: L5X data type name.
-        scope: 'controller' or 'program'.
-        program_name: Required when scope is 'program'.
-        dimensions: Array dimensions (e.g. '10', '3,4'). Empty for scalar.
-        description: Optional description text.
-        radix: Display radix override (Decimal, Hex, Binary, etc.).
-        tag_class: 'Standard' or 'Safety'. Auto-detected when empty:
-            controller scope defaults to Standard; program scope auto-detects
-            Safety from program type.
-    """
-    prj = _require_project()
-    try:
-        _tags.create_tag(
-            prj, name, data_type,
-            scope=scope,
-            program_name=program_name or None,
-            dimensions=dimensions or None,
-            description=description or None,
-            radix=radix or None,
-            tag_class=tag_class or None,
-        )
-        return f"Created tag '{name}' (type={data_type}, scope={scope})"
-    except Exception as e:
-        return f"Error creating tag: {e}"
-
-
-@mcp.tool()
-def delete_tag(
-    name: str,
+def manage_tags(
+    operations_json: str,
     scope: str = "controller",
     program_name: str = "",
 ) -> str:
-    """Delete a tag from the project.
+    """Execute one or more tag CRUD operations in sequence.
+
+    Replaces the former create_tag, delete_tag, rename_tag, copy_tag,
+    move_tag, batch_create_tags, and create_alias_tag tools.
 
     Args:
-        name: Tag name to delete.
-        scope: 'controller' or 'program'.
-        program_name: Required when scope is 'program'.
+        operations_json: JSON array of operation objects. Each has an
+            'action' field plus action-specific fields:
+
+            create:       {name, data_type, dimensions?, description?,
+                           radix?, tag_class?}
+            delete:       {name}
+            rename:       {name, new_name, update_references? (default true)}
+            copy:         {name, new_name, to_scope?, to_program_name?}
+            move:         {name, to_scope, to_program?}
+            create_alias: {name, alias_for, description?}
+
+            Each operation can optionally include 'scope' and 'program_name'
+            to override the tool-level defaults.
+
+        scope: Default scope for all operations ('controller' or 'program').
+        program_name: Default program for all operations.
+
+    Example:
+        [{"action": "create", "name": "Motor1_Run", "data_type": "BOOL"},
+         {"action": "create", "name": "Motor1_Flt", "data_type": "BOOL",
+          "description": "Motor 1 fault"},
+         {"action": "rename", "name": "OldTag", "new_name": "NewTag"}]
     """
     prj = _require_project()
     try:
-        _tags.delete_tag(prj, name, scope=scope, program_name=program_name or None)
-        return f"Deleted tag '{name}'"
-    except Exception as e:
-        return f"Error deleting tag: {e}"
+        ops = json.loads(operations_json)
+    except json.JSONDecodeError as e:
+        return f"Error: Invalid JSON -- {e}"
 
+    results = []
+    for i, op in enumerate(ops):
+        action = op.get("action", "")
+        op_scope = op.get("scope", scope)
+        op_prog = op.get("program_name", program_name) or None
 
-@mcp.tool()
-def rename_tag(
-    old_name: str,
-    new_name: str,
-    scope: str = "controller",
-    program_name: str = "",
-    update_references: bool = True,
-) -> str:
-    """Rename a tag, optionally updating all references in rungs.
-
-    Args:
-        old_name: Current tag name.
-        new_name: New tag name.
-        scope: 'controller' or 'program'.
-        program_name: Required when scope is 'program'.
-        update_references: If true, updates all rung/ST references.
-    """
-    prj = _require_project()
-    try:
-        _tags.rename_tag(
-            prj, old_name, new_name,
-            scope=scope,
-            program_name=program_name or None,
-            update_references=update_references,
-        )
-        msg = f"Renamed tag '{old_name}' -> '{new_name}'"
-        if update_references:
-            msg += " (references updated)"
-        return msg
-    except Exception as e:
-        return f"Error renaming tag: {e}"
-
-
-@mcp.tool()
-def set_tag_value(
-    name: str,
-    value: str,
-    scope: str = "controller",
-    program_name: str = "",
-) -> str:
-    """Set the value of a scalar tag (DINT, REAL, BOOL, etc.).
-
-    Updates both L5K and Decorated data formats to keep them in sync.
-
-    Args:
-        name: Tag name.
-        value: Value as a string (e.g. '42', '3.14', '1' for true).
-        scope: 'controller' or 'program'.
-        program_name: Required when scope is 'program'.
-    """
-    prj = _require_project()
-    try:
-        # Auto-convert value to appropriate Python type
-        info = _tags.get_tag_info(prj, name, scope=scope, program_name=program_name or None)
-        dt = info.get('data_type', '')
-        if dt in ('REAL', 'LREAL'):
-            py_val = float(value)
-        elif dt == 'BOOL':
-            py_val = 1 if value.lower() in ('1', 'true', 'yes') else 0
-        else:
-            py_val = int(value)
-        _tags.set_tag_value(prj, name, py_val, scope=scope, program_name=program_name or None)
-        return f"Set '{name}' = {py_val}"
-    except Exception as e:
-        return f"Error setting tag value: {e}"
-
-
-@mcp.tool()
-def set_tag_member_value(
-    name: str,
-    member_path: str,
-    value: str,
-    scope: str = "controller",
-    program_name: str = "",
-) -> str:
-    """Set a member value in a structured or array tag.
-
-    Use dot notation for structure members (e.g. 'PRE', 'Status.Active')
-    and brackets for array indices (e.g. '[0]', '[2].EN').
-
-    Args:
-        name: Tag name.
-        member_path: Path to the member (e.g. 'PRE', '[0]', '[2].EN').
-        value: Value as a string.
-        scope: 'controller' or 'program'.
-        program_name: Required when scope is 'program'.
-    """
-    prj = _require_project()
-    try:
-        # Try int first, then float
         try:
-            py_val = int(value)
-        except ValueError:
-            py_val = float(value)
-        _tags.set_tag_member_value(
-            prj, name, member_path, py_val,
-            scope=scope, program_name=program_name or None,
-        )
-        return f"Set '{name}.{member_path}' = {py_val}"
-    except Exception as e:
-        return f"Error setting member value: {e}"
+            if action == "create":
+                _tags.create_tag(
+                    prj, op["name"], op["data_type"],
+                    scope=op_scope,
+                    program_name=op_prog,
+                    dimensions=op.get("dimensions") or None,
+                    description=op.get("description") or None,
+                    radix=op.get("radix") or None,
+                    tag_class=op.get("tag_class") or None,
+                )
+                results.append({"index": i, "status": "ok", "action": "create",
+                                "name": op["name"]})
+
+            elif action == "delete":
+                _tags.delete_tag(
+                    prj, op["name"],
+                    scope=op_scope, program_name=op_prog,
+                )
+                results.append({"index": i, "status": "ok", "action": "delete",
+                                "name": op["name"]})
+
+            elif action == "rename":
+                _tags.rename_tag(
+                    prj, op["name"], op["new_name"],
+                    scope=op_scope,
+                    program_name=op_prog,
+                    update_references=op.get("update_references", True),
+                )
+                results.append({"index": i, "status": "ok", "action": "rename",
+                                "old": op["name"], "new": op["new_name"]})
+
+            elif action == "copy":
+                _tags.copy_tag(
+                    prj, op["name"], op["new_name"],
+                    source_scope=op_scope,
+                    source_program=op_prog,
+                    dest_scope=op.get("to_scope", op_scope),
+                    dest_program=op.get("to_program_name", op_prog),
+                )
+                results.append({"index": i, "status": "ok", "action": "copy",
+                                "name": op["name"], "new_name": op["new_name"]})
+
+            elif action == "move":
+                _tags.move_tag(
+                    prj, op["name"],
+                    from_scope=op_scope,
+                    from_program=op_prog,
+                    to_scope=op["to_scope"],
+                    to_program=op.get("to_program") or None,
+                )
+                results.append({"index": i, "status": "ok", "action": "move",
+                                "name": op["name"]})
+
+            elif action == "create_alias":
+                _tags.create_alias_tag(
+                    prj, op["name"], op["alias_for"],
+                    scope=op_scope,
+                    program_name=op_prog,
+                    description=op.get("description") or None,
+                )
+                results.append({"index": i, "status": "ok", "action": "create_alias",
+                                "name": op["name"]})
+
+            else:
+                results.append({"index": i, "status": "error",
+                                "message": f"Unknown action: {action}"})
+        except Exception as e:
+            results.append({"index": i, "status": "error", "action": action,
+                            "message": str(e)})
+
+    succeeded = sum(1 for r in results if r["status"] == "ok")
+    failed = sum(1 for r in results if r["status"] == "error")
+    return json.dumps(
+        {"succeeded": succeeded, "failed": failed, "details": results},
+        indent=2,
+    )
 
 
 @mcp.tool()
-def set_tag_description(
-    name: str,
-    description: str,
+def update_tags(
+    updates_json: str,
     scope: str = "controller",
     program_name: str = "",
 ) -> str:
-    """Set or update a tag's description text.
+    """Set values, member values, and descriptions on one or more tags.
+
+    Replaces the former set_tag_value, set_tag_member_value, and
+    set_tag_description tools.
 
     Args:
-        name: Tag name.
-        description: Description text.
-        scope: 'controller' or 'program'.
-        program_name: Required when scope is 'program'.
+        updates_json: JSON array of update objects. Each has:
+            - 'name': tag name (required)
+            - 'value': new scalar value as string (optional)
+            - 'description': new description text (optional)
+            - 'members': dict of {member_path: value} for structured
+              or array tags (optional)
+
+            Each update can optionally include 'scope' and 'program_name'.
+
+        scope: Default scope for all updates.
+        program_name: Default program for all updates.
+
+    Example:
+        [{"name": "Timer1", "members": {"PRE": "5000"},
+          "description": "Main cycle timer"},
+         {"name": "MotorSpeed", "value": "1750"}]
     """
     prj = _require_project()
     try:
-        _tags.set_tag_description(
-            prj, name, description,
-            scope=scope, program_name=program_name or None,
-        )
-        return f"Set description on '{name}'"
-    except Exception as e:
-        return f"Error setting description: {e}"
+        updates = json.loads(updates_json)
+    except json.JSONDecodeError as e:
+        return f"Error: Invalid JSON -- {e}"
 
+    results = []
+    for i, upd in enumerate(updates):
+        tag_name = upd.get("name", "")
+        upd_scope = upd.get("scope", scope)
+        upd_prog = upd.get("program_name", program_name) or None
+        changes_made = []
 
-@mcp.tool()
-def copy_tag(
-    name: str,
-    new_name: str,
-    scope: str = "controller",
-    program_name: str = "",
-    to_scope: str = "",
-    to_program_name: str = "",
-) -> str:
-    """Deep copy a tag to a new name, preserving all data and descriptions.
+        try:
+            # Set scalar value
+            if "value" in upd:
+                info = _tags.get_tag_info(
+                    prj, tag_name, scope=upd_scope, program_name=upd_prog,
+                )
+                dt = info.get("data_type", "")
+                py_val = _auto_convert_value(str(upd["value"]), dt)
+                _tags.set_tag_value(
+                    prj, tag_name, py_val,
+                    scope=upd_scope, program_name=upd_prog,
+                )
+                changes_made.append(f"value={py_val}")
 
-    Supports cross-scope copies (e.g. controller to program).
+            # Set member values
+            if "members" in upd:
+                for member_path, member_val in upd["members"].items():
+                    try:
+                        py_val = int(str(member_val))
+                    except ValueError:
+                        py_val = float(str(member_val))
+                    _tags.set_tag_member_value(
+                        prj, tag_name, member_path, py_val,
+                        scope=upd_scope, program_name=upd_prog,
+                    )
+                    changes_made.append(f"{member_path}={py_val}")
 
-    Args:
-        name: Source tag name.
-        new_name: Name for the copy.
-        scope: Source scope ('controller' or 'program').
-        program_name: Required when source scope is 'program'.
-        to_scope: Destination scope. Defaults to same as source.
-        to_program_name: Required when destination scope is 'program'.
-    """
-    prj = _require_project()
-    try:
-        _tags.copy_tag(
-            prj, name, new_name,
-            source_scope=scope,
-            source_program=program_name or None,
-            dest_scope=to_scope or scope,
-            dest_program=to_program_name or program_name or None,
-        )
-        return f"Copied '{name}' -> '{new_name}'"
-    except Exception as e:
-        return f"Error copying tag: {e}"
+            # Set description
+            if "description" in upd:
+                _tags.set_tag_description(
+                    prj, tag_name, upd["description"],
+                    scope=upd_scope, program_name=upd_prog,
+                )
+                changes_made.append("description")
 
+            results.append({"index": i, "status": "ok", "name": tag_name,
+                            "changes": changes_made})
+        except Exception as e:
+            results.append({"index": i, "status": "error", "name": tag_name,
+                            "message": str(e)})
 
-@mcp.tool()
-def move_tag(
-    name: str,
-    from_scope: str = "controller",
-    from_program: str = "",
-    to_scope: str = "program",
-    to_program: str = "",
-) -> str:
-    """Move a tag from one scope to another (e.g. controller to program).
-
-    Args:
-        name: Tag name to move.
-        from_scope: Source scope ('controller' or 'program').
-        from_program: Required when source scope is 'program'.
-        to_scope: Destination scope ('controller' or 'program').
-        to_program: Required when destination scope is 'program'.
-    """
-    prj = _require_project()
-    try:
-        _tags.move_tag(
-            prj, name,
-            from_scope=from_scope,
-            from_program=from_program or None,
-            to_scope=to_scope,
-            to_program=to_program or None,
-        )
-        return f"Moved '{name}' from {from_scope} to {to_scope}"
-    except Exception as e:
-        return f"Error moving tag: {e}"
-
-
-@mcp.tool()
-def batch_create_tags(
-    tag_specs_json: str,
-    scope: str = "controller",
-    program_name: str = "",
-) -> str:
-    """Create multiple tags from a JSON array of specifications.
-
-    Each spec object should have: name, data_type, and optionally
-    description, dimensions, radix.
-
-    Example: [{"name": "Tag1", "data_type": "DINT"}, {"name": "Tag2", "data_type": "REAL"}]
-
-    Args:
-        tag_specs_json: JSON array of tag specification objects.
-        scope: Default scope for all tags.
-        program_name: Default program name for all tags.
-    """
-    prj = _require_project()
-    try:
-        specs = json.loads(tag_specs_json)
-        created = _tags.batch_create_tags(
-            prj, specs,
-            scope=scope,
-            program_name=program_name or None,
-        )
-        return f"Created {len(created)} tags"
-    except Exception as e:
-        return f"Error in batch create: {e}"
-
-
-@mcp.tool()
-def create_alias_tag(
-    name: str,
-    alias_for: str,
-    scope: str = "controller",
-    program_name: str = "",
-    description: str = "",
-) -> str:
-    """Create an alias tag pointing to another tag or I/O path.
-
-    Alias tags inherit their data type from the target and have no data
-    elements. Use aliases for modular programming — they allow programs
-    to reference logical names that map to physical I/O or other tags.
-
-    Args:
-        name: Alias tag name (max 40 chars).
-        alias_for: Target tag name, member path, or I/O point
-            (e.g. 'MyTag', 'MyTag.Member', 'Local:1:I.Data.0').
-        scope: 'controller' or 'program'.
-        program_name: Required when scope is 'program'.
-        description: Optional description text.
-    """
-    prj = _require_project()
-    try:
-        _tags.create_alias_tag(
-            prj, name, alias_for,
-            scope=scope,
-            program_name=program_name or None,
-            description=description or None,
-        )
-        return f"Created alias tag '{name}' -> '{alias_for}' (scope={scope})"
-    except Exception as e:
-        return f"Error creating alias tag: {e}"
+    succeeded = sum(1 for r in results if r["status"] == "ok")
+    failed = sum(1 for r in results if r["status"] == "error")
+    return json.dumps(
+        {"succeeded": succeeded, "failed": failed, "details": results},
+        indent=2,
+    )
 
 
 # ===================================================================
@@ -804,140 +808,102 @@ def create_routine(
 
 
 @mcp.tool()
-def add_rung(
+def manage_rungs(
     program_name: str,
     routine_name: str,
-    instruction_text: str,
-    comment: str = "",
-    position: int = -1,
+    operations_json: str,
 ) -> str:
-    """Add a rung to an RLL routine.
+    """Execute one or more rung operations on a routine in sequence.
 
-    The instruction text must be valid RLL syntax ending with a semicolon.
-    Examples: 'XIC(StartPB)OTE(MotorRun);', 'TON(Timer1,1000,0);'
+    Replaces the former add_rung, delete_rung, modify_rung_text,
+    set_rung_comment, and duplicate_rung_with_substitution tools.
+
+    Operations are processed in order. Rung numbers in later operations
+    should account for insertions/deletions made by earlier operations
+    in the same batch.
 
     Args:
         program_name: Program containing the routine.
         routine_name: Name of the RLL routine.
-        instruction_text: The rung instruction text.
-        comment: Optional rung comment.
-        position: Insert position (0-based). -1 to append at end.
+        operations_json: JSON array of operation objects. Each has an
+            'action' field plus action-specific fields:
+
+            add:       {text, comment?, position? (-1 or omit to append)}
+            delete:    {rung_number}
+            modify:    {rung_number, text?, comment?} (set either or both)
+            duplicate: {rung_number, substitutions, comment?}
+
+    Example:
+        [{"action": "add", "text": "XIC(Start)OTE(Run);",
+          "comment": "Start logic"},
+         {"action": "add", "text": "TON(Delay,1000,0);"},
+         {"action": "modify", "rung_number": 0, "comment": "Updated"}]
     """
     prj = _require_project()
     try:
-        pos = position if position >= 0 else None
-        _programs.add_rung(
-            prj, program_name, routine_name,
-            instruction_text,
-            comment=comment or None,
-            position=pos,
-        )
-        return f"Added rung to '{program_name}/{routine_name}': {instruction_text[:60]}"
-    except Exception as e:
-        return f"Error adding rung: {e}"
+        ops = json.loads(operations_json)
+    except json.JSONDecodeError as e:
+        return f"Error: Invalid JSON -- {e}"
 
+    results = []
+    for i, op in enumerate(ops):
+        action = op.get("action", "")
+        try:
+            if action == "add":
+                pos = op.get("position")
+                pos = pos if pos is not None and pos >= 0 else None
+                _programs.add_rung(
+                    prj, program_name, routine_name,
+                    op["text"],
+                    comment=op.get("comment") or None,
+                    position=pos,
+                )
+                results.append({"index": i, "status": "ok", "action": "add",
+                                "text": op["text"][:60]})
 
-@mcp.tool()
-def delete_rung(
-    program_name: str,
-    routine_name: str,
-    rung_number: int,
-) -> str:
-    """Delete a rung by its index number.
+            elif action == "delete":
+                _programs.delete_rung(
+                    prj, program_name, routine_name, op["rung_number"],
+                )
+                results.append({"index": i, "status": "ok", "action": "delete",
+                                "rung_number": op["rung_number"]})
 
-    Args:
-        program_name: Program containing the routine.
-        routine_name: Name of the RLL routine.
-        rung_number: Zero-based rung index.
-    """
-    prj = _require_project()
-    try:
-        _programs.delete_rung(prj, program_name, routine_name, rung_number)
-        return f"Deleted rung {rung_number} from '{program_name}/{routine_name}'"
-    except Exception as e:
-        return f"Error deleting rung: {e}"
+            elif action == "modify":
+                rn = op["rung_number"]
+                if "text" in op:
+                    _programs.modify_rung_text(
+                        prj, program_name, routine_name, rn, op["text"],
+                    )
+                if "comment" in op:
+                    _programs.set_rung_comment(
+                        prj, program_name, routine_name, rn, op["comment"],
+                    )
+                results.append({"index": i, "status": "ok", "action": "modify",
+                                "rung_number": rn})
 
+            elif action == "duplicate":
+                subs = op.get("substitutions", {})
+                _programs.duplicate_rung_with_substitution(
+                    prj, program_name, routine_name, op["rung_number"],
+                    subs,
+                    new_comment=op.get("comment") or None,
+                )
+                results.append({"index": i, "status": "ok", "action": "duplicate",
+                                "rung_number": op["rung_number"]})
 
-@mcp.tool()
-def modify_rung_text(
-    program_name: str,
-    routine_name: str,
-    rung_number: int,
-    new_text: str,
-) -> str:
-    """Replace the instruction text of an existing rung.
+            else:
+                results.append({"index": i, "status": "error",
+                                "message": f"Unknown action: {action}"})
+        except Exception as e:
+            results.append({"index": i, "status": "error", "action": action,
+                            "message": str(e)})
 
-    Args:
-        program_name: Program containing the routine.
-        routine_name: Name of the RLL routine.
-        rung_number: Zero-based rung index.
-        new_text: New instruction text (must end with semicolon).
-    """
-    prj = _require_project()
-    try:
-        _programs.modify_rung_text(prj, program_name, routine_name, rung_number, new_text)
-        return f"Modified rung {rung_number}: {new_text[:60]}"
-    except Exception as e:
-        return f"Error modifying rung: {e}"
-
-
-@mcp.tool()
-def set_rung_comment(
-    program_name: str,
-    routine_name: str,
-    rung_number: int,
-    comment: str,
-) -> str:
-    """Set or update the comment on a rung.
-
-    Args:
-        program_name: Program containing the routine.
-        routine_name: Name of the RLL routine.
-        rung_number: Zero-based rung index.
-        comment: Comment text.
-    """
-    prj = _require_project()
-    try:
-        _programs.set_rung_comment(prj, program_name, routine_name, rung_number, comment)
-        return f"Set comment on rung {rung_number}"
-    except Exception as e:
-        return f"Error setting comment: {e}"
-
-
-@mcp.tool()
-def duplicate_rung_with_substitution(
-    program_name: str,
-    routine_name: str,
-    rung_number: int,
-    substitutions_json: str,
-    comment: str = "",
-) -> str:
-    """Duplicate a rung with tag name replacements.
-
-    Creates a copy of the rung immediately after the original, with all
-    tag names substituted according to the provided mapping. This is the
-    primary tool for bulk rung generation (e.g. duplicating conveyor logic
-    for multiple zones).
-
-    Args:
-        program_name: Program containing the routine.
-        routine_name: Name of the RLL routine.
-        rung_number: Zero-based index of the rung to duplicate.
-        substitutions_json: JSON object mapping old tag names to new ones.
-            Example: '{"OldTag": "NewTag", "Timer1": "Timer2"}'
-        comment: Optional comment for the new rung.
-    """
-    prj = _require_project()
-    try:
-        subs = json.loads(substitutions_json)
-        _programs.duplicate_rung_with_substitution(
-            prj, program_name, routine_name, rung_number,
-            subs,
-            new_comment=comment or None,
-        )
-        return f"Duplicated rung {rung_number} with {len(subs)} substitutions"
-    except Exception as e:
-        return f"Error duplicating rung: {e}"
+    succeeded = sum(1 for r in results if r["status"] == "ok")
+    failed = sum(1 for r in results if r["status"] == "error")
+    return json.dumps(
+        {"succeeded": succeeded, "failed": failed, "details": results},
+        indent=2,
+    )
 
 
 @mcp.tool()
@@ -973,179 +939,118 @@ def unschedule_program(task_name: str, program_name: str) -> str:
 
 
 # ===================================================================
-# 5. Import Operations
+# 5. Import Operations (consolidated)
 # ===================================================================
 
 @mcp.tool()
-def import_aoi(file_path: str, overwrite: bool = False) -> str:
-    """Import an Add-On Instruction from an L5X export file.
-
-    Automatically imports dependent UDTs and AOIs found in the source file.
-    Updates the EditedDate so Studio 5000 accepts the import.
-
-    Args:
-        file_path: Path to the AOI .L5X export file.
-        overwrite: If true, replace existing AOI with same name.
-    """
-    prj = _require_project()
-    try:
-        file_path = _normalize_path(file_path)
-        elem = _aoi.import_aoi(prj, file_path, overwrite=overwrite)
-        name = elem.get("Name", "?")
-        return f"Imported AOI '{name}'"
-    except Exception as e:
-        return f"Error importing AOI: {e}"
-
-
-@mcp.tool()
-def import_udt(file_path: str, overwrite: bool = False) -> str:
-    """Import a User-Defined Type from an L5X export file.
-
-    Recursively imports transitive UDT dependencies.
-
-    Args:
-        file_path: Path to the UDT .L5X export file.
-        overwrite: If true, replace existing UDT with same name.
-    """
-    prj = _require_project()
-    try:
-        file_path = _normalize_path(file_path)
-        elem = _udt.import_udt(prj, file_path, overwrite=overwrite)
-        name = elem.get("Name", "?")
-        return f"Imported UDT '{name}'"
-    except Exception as e:
-        return f"Error importing UDT: {e}"
-
-
-@mcp.tool()
-def import_module(
-    template_path: str,
-    name: str,
+def import_component(
+    file_path: str,
+    conflict_resolution: str = "report",
+    target_program: str = "",
+    target_routine: str = "",
+    rung_position: int = -1,
+    module_name: str = "",
     parent_module: str = "Local",
-    address: str = "",
-    slot: str = "",
-    description: str = "",
+    module_address: str = "",
+    module_slot: str = "",
+    overwrite: bool = False,
 ) -> str:
-    """Import an I/O module from a template L5X file.
+    """Import a component export file into the loaded project.
 
-    Copies the module definition, assigns the given name, and configures
-    the parent module, address, and slot.
+    Automatically detects the component type (Rung, Routine, Program,
+    DataType, AddOnInstructionDefinition, Module) and imports with
+    conflict detection and resolution.
+
+    This replaces the former import_aoi, import_udt, and import_module
+    tools. For AOI/UDT/Module files that need simple imports (no conflict
+    analysis), set conflict_resolution='overwrite' or 'skip'.
+
+    For Module template imports, also provide module_name and optionally
+    parent_module, module_address, and module_slot.
 
     Args:
-        template_path: Path to the module template .L5X file.
-        name: Name for the new module.
+        file_path: Path to the component export .L5X file.
+        conflict_resolution: How to handle conflicts:
+            'report' = dry run (return conflicts only, no changes),
+            'skip' = import non-conflicting items and skip conflicts,
+            'overwrite' = replace existing items with imported versions,
+            'fail' = abort on any conflict.
+        target_program: Override target program (for Rung/Routine imports).
+        target_routine: Override target routine (for Rung imports).
+        rung_position: Insert position for rungs (0-based). -1 to append.
+        module_name: Name for an imported module (Module files only).
         parent_module: Parent module name (default: 'Local').
-        address: IP address for Ethernet ports.
-        slot: Slot number for backplane ports.
-        description: Optional module description.
+        module_address: IP address for Ethernet modules.
+        module_slot: Slot number for backplane modules.
+        overwrite: Shorthand -- when true, sets conflict_resolution='overwrite'.
     """
     prj = _require_project()
     try:
-        template_path = _normalize_path(template_path)
-        _modules.import_module(
-            prj, template_path, name,
-            parent_module=parent_module,
-            address=address or None,
-            slot=slot or None,
-            description=description or None,
+        fp = _normalize_path(file_path)
+
+        if overwrite and conflict_resolution == "report":
+            conflict_resolution = "overwrite"
+
+        # Detect if this is a Module file needing the legacy import path
+        if module_name:
+            _modules.import_module(
+                prj, fp, module_name,
+                parent_module=parent_module,
+                address=module_address or None,
+                slot=module_slot or None,
+            )
+            return f"Imported module '{module_name}' under '{parent_module}'"
+
+        # Detect if this is a standalone AOI/UDT file where the user
+        # wants a simple overwrite import (legacy import_aoi/import_udt)
+        from .utils import parse_l5x
+        source_root = parse_l5x(fp)
+        target_type = source_root.get("TargetType", "")
+
+        if target_type == "AddOnInstructionDefinition" and conflict_resolution == "overwrite":
+            elem = _aoi.import_aoi(prj, fp, overwrite=True)
+            name = elem.get("Name", "?")
+            return f"Imported AOI '{name}'"
+
+        if target_type == "DataType" and conflict_resolution == "overwrite":
+            elem = _udt.import_udt(prj, fp, overwrite=True)
+            name = elem.get("Name", "?")
+            return f"Imported UDT '{name}'"
+
+        # General import path with conflict resolution
+        result = _comp_import.import_component(
+            prj, fp,
+            conflict_resolution=conflict_resolution,
+            target_program=target_program,
+            target_routine=target_routine,
+            rung_position=rung_position,
         )
-        return f"Imported module '{name}' under '{parent_module}'"
+        return json.dumps(result.to_dict(), indent=2)
     except Exception as e:
-        return f"Error importing module: {e}"
+        return f"Error importing component: {e}"
+
+
+@mcp.tool()
+def analyze_import(file_path: str) -> str:
+    """Dry-run conflict analysis for importing a component export file.
+
+    Checks for UDT/AOI definition mismatches, tag type conflicts,
+    and name collisions without making any changes to the project.
+
+    Args:
+        file_path: Path to the component export .L5X file.
+    """
+    prj = _require_project()
+    try:
+        fp = _normalize_path(file_path)
+        result = _comp_import.analyze_import(prj, fp)
+        return json.dumps(result.to_dict(), indent=2)
+    except Exception as e:
+        return f"Error analyzing import: {e}"
 
 
 # ===================================================================
-# 6. Analysis Tools
-# ===================================================================
-
-@mcp.tool()
-def get_aoi_info(name: str) -> str:
-    """Get detailed information about an Add-On Instruction.
-
-    Returns name, revision, description, parameters, local tags, and routines.
-
-    Args:
-        name: AOI name.
-    """
-    prj = _require_project()
-    try:
-        info = _aoi.get_aoi_info(prj, name)
-        return json.dumps(info, indent=2)
-    except Exception as e:
-        return f"Error getting AOI info: {e}"
-
-
-@mcp.tool()
-def get_aoi_parameters(name: str) -> str:
-    """Get the parameter list for an Add-On Instruction.
-
-    Returns each parameter's name, data type, usage (Input/Output/InOut),
-    required flag, and description.
-
-    Args:
-        name: AOI name.
-    """
-    prj = _require_project()
-    try:
-        params = _aoi.get_aoi_parameters(prj, name)
-        return json.dumps(params, indent=2)
-    except Exception as e:
-        return f"Error getting AOI parameters: {e}"
-
-
-@mcp.tool()
-def get_udt_info(name: str) -> str:
-    """Get detailed information about a User-Defined Type.
-
-    Returns name, family, description, and member list.
-
-    Args:
-        name: UDT name.
-    """
-    prj = _require_project()
-    try:
-        info = _udt.get_udt_info(prj, name)
-        return json.dumps(info, indent=2)
-    except Exception as e:
-        return f"Error getting UDT info: {e}"
-
-
-@mcp.tool()
-def get_udt_members(name: str) -> str:
-    """Get the member list for a User-Defined Type.
-
-    Returns visible members only (excludes hidden backing fields).
-
-    Args:
-        name: UDT name.
-    """
-    prj = _require_project()
-    try:
-        members = _udt.get_udt_members(prj, name)
-        return json.dumps(members, indent=2)
-    except Exception as e:
-        return f"Error getting UDT members: {e}"
-
-
-@mcp.tool()
-def find_tag_references(tag_name: str) -> str:
-    """Find all locations where a tag is referenced in rung text or ST code.
-
-    Returns a list of {program, routine, rung, text} for each reference.
-
-    Args:
-        tag_name: Tag name to search for.
-    """
-    prj = _require_project()
-    try:
-        refs = prj.find_tag_references(tag_name)
-        return json.dumps(refs)
-    except Exception as e:
-        return f"Error finding references: {e}"
-
-
-# ===================================================================
-# 7. Validation & Utilities
+# 6. Validation & Utilities (consolidated)
 # ===================================================================
 
 @mcp.tool()
@@ -1164,7 +1069,7 @@ def validate_project() -> str:
             "is_valid": result.is_valid,
             "error_count": len(result.errors),
             "warning_count": len(result.warnings),
-            "errors": result.errors[:50],  # Cap at 50 to avoid huge responses
+            "errors": result.errors[:50],
             "warnings": result.warnings[:50],
         }
         return json.dumps(output, indent=2)
@@ -1173,205 +1078,280 @@ def validate_project() -> str:
 
 
 @mcp.tool()
-def validate_rung_syntax(rung_text: str) -> str:
-    """Check if a rung instruction text string is syntactically valid.
-
-    Returns a list of error messages (empty list = valid).
-
-    Args:
-        rung_text: The instruction text to validate (e.g. 'XIC(tag1)OTE(tag2);').
-    """
-    errors = _rungs.validate_rung_syntax(rung_text)
-    if not errors:
-        return "Valid"
-    return json.dumps(errors)
-
-
-@mcp.tool()
-def substitute_tags_in_rung(
+def analyze_rung_text(
     rung_text: str,
-    substitutions_json: str,
+    action: str = "validate",
+    substitutions_json: str = "",
 ) -> str:
-    """Replace tag names in a rung instruction text string.
+    """Analyze, validate, or transform rung instruction text.
 
-    Uses word-boundary-safe replacement to avoid partial matches.
+    Replaces the former validate_rung_syntax, substitute_tags_in_rung,
+    and extract_tag_references_from_rung tools.
 
     Args:
-        rung_text: Original instruction text.
+        rung_text: The instruction text (e.g. 'XIC(tag1)OTE(tag2);').
+        action: What to do with the text:
+            'validate'      -- check syntax, return 'Valid' or error list.
+            'extract_tags'  -- return sorted list of referenced tag names.
+            'substitute'    -- replace tag names using substitutions_json.
         substitutions_json: JSON object mapping old names to new names.
+            Required when action='substitute'.
     """
     try:
-        subs = json.loads(substitutions_json)
-        result = _rungs.substitute_tags(rung_text, subs)
-        return result
+        if action == "validate":
+            errors = _rungs.validate_rung_syntax(rung_text)
+            if not errors:
+                return "Valid"
+            return json.dumps(errors)
+
+        elif action == "extract_tags":
+            refs = _rungs.extract_tag_references(rung_text)
+            return json.dumps(sorted(refs))
+
+        elif action == "substitute":
+            if not substitutions_json:
+                return "Error: substitutions_json is required for action='substitute'."
+            subs = json.loads(substitutions_json)
+            result = _rungs.substitute_tags(rung_text, subs)
+            return result
+
+        else:
+            return (
+                f"Error: Unknown action '{action}'. "
+                f"Choose from: validate, extract_tags, substitute."
+            )
     except Exception as e:
-        return f"Error substituting tags: {e}"
-
-
-@mcp.tool()
-def extract_tag_references_from_rung(rung_text: str) -> str:
-    """Extract all tag names referenced in a rung instruction text.
-
-    Returns base tag names (e.g. Timer1.DN -> Timer1, Array[0] -> Array).
-
-    Args:
-        rung_text: The instruction text to analyze.
-    """
-    refs = _rungs.extract_tag_references(rung_text)
-    return json.dumps(sorted(refs))
+        return f"Error analyzing rung text: {e}"
 
 
 # ===================================================================
-# 8. Alarm Management
+# 7. Alarm Management (consolidated)
 # ===================================================================
 
 @mcp.tool()
-def create_alarm_digital_tag(
-    name: str,
-    message: str,
-    severity: int = 500,
+def manage_alarms(
+    operations_json: str,
     scope: str = "controller",
     program_name: str = "",
-    description: str = "",
-    ack_required: bool = True,
-    latched: bool = False,
-    tag_class: str = "",
 ) -> str:
-    """Create an ALARM_DIGITAL tag for use with the ALMD instruction.
+    """Create, configure, and inspect alarm tags in a single call.
 
-    ALARM_DIGITAL tags are standalone alarm tags that use <Data Format="Alarm">
-    instead of L5K/Decorated data. They are driven by ALMD instructions in
-    rung logic.
+    Replaces the former create_alarm_digital_tag, batch_create_alarm_digital_tags,
+    get_alarm_digital_info, configure_alarm_digital_tag,
+    get_tag_alarm_conditions, and configure_tag_alarm_condition tools.
 
     Args:
-        name: Tag name (max 40 chars).
-        message: Alarm message text (e.g. 'Conveyor A0060 Faulted').
-        severity: Alarm severity 1-1000 (500 = medium, 1000 = critical).
-        scope: 'controller' or 'program'.
-        program_name: Required when scope is 'program'.
-        description: Optional tag description.
-        ack_required: Whether the alarm requires acknowledgment.
-        latched: Whether the alarm latches (stays active after condition clears).
-        tag_class: 'Standard' or 'Safety'. Auto-detected when empty.
+        operations_json: JSON array of operation objects. Each has an
+            'action' field plus action-specific fields:
+
+            create_digital:      {name, message, severity? (1-1000, default 500),
+                                  description?, ack_required? (default true),
+                                  latched? (default false), tag_class?}
+            configure_digital:   {name, severity?, message?, ack_required?,
+                                  latched?}  (only specified fields are changed)
+            get_info:            {name}
+            get_conditions:      {name}
+            configure_condition: {tag_name, condition_name, severity?,
+                                  on_delay?, off_delay?, used?,
+                                  ack_required?, message?}
+
+            Each operation can optionally include 'scope' and 'program_name'.
+
+        scope: Default scope for all operations.
+        program_name: Default program for all operations.
+
+    Example:
+        [{"action": "create_digital", "name": "Alarm_Conv1",
+          "message": "Conveyor 1 Fault", "severity": 750},
+         {"action": "create_digital", "name": "Alarm_Conv2",
+          "message": "Conveyor 2 Fault", "severity": 750}]
     """
     prj = _require_project()
     try:
-        _tags.create_alarm_digital_tag(
-            prj, name=name, message=message, severity=severity,
-            scope=scope, program_name=program_name or None,
-            description=description or None,
-            ack_required=ack_required, latched=latched,
-            tag_class=tag_class or None,
-        )
-        return (
-            f"Created ALARM_DIGITAL tag '{name}' "
-            f"(severity={severity}, message='{message}')"
-        )
-    except Exception as e:
-        return f"Error creating ALARM_DIGITAL tag: {e}"
+        ops = json.loads(operations_json)
+    except json.JSONDecodeError as e:
+        return f"Error: Invalid JSON -- {e}"
+
+    results = []
+    for i, op in enumerate(ops):
+        action = op.get("action", "")
+        op_scope = op.get("scope", scope)
+        op_prog = op.get("program_name", program_name) or None
+
+        try:
+            if action == "create_digital":
+                _tags.create_alarm_digital_tag(
+                    prj,
+                    name=op["name"],
+                    message=op["message"],
+                    severity=op.get("severity", 500),
+                    scope=op_scope,
+                    program_name=op_prog,
+                    description=op.get("description") or None,
+                    ack_required=op.get("ack_required", True),
+                    latched=op.get("latched", False),
+                    tag_class=op.get("tag_class") or None,
+                )
+                results.append({"index": i, "status": "ok",
+                                "action": "create_digital", "name": op["name"]})
+
+            elif action == "configure_digital":
+                kwargs: dict = {}
+                if "severity" in op:
+                    kwargs["severity"] = op["severity"]
+                if "message" in op:
+                    kwargs["message"] = op["message"]
+                if "ack_required" in op:
+                    val = op["ack_required"]
+                    kwargs["ack_required"] = (
+                        val if isinstance(val, bool)
+                        else str(val).lower() == "true"
+                    )
+                if "latched" in op:
+                    val = op["latched"]
+                    kwargs["latched"] = (
+                        val if isinstance(val, bool)
+                        else str(val).lower() == "true"
+                    )
+                _tags.configure_alarm_digital_tag(
+                    prj, op["name"],
+                    scope=op_scope, program_name=op_prog,
+                    **kwargs,
+                )
+                changes = ", ".join(f"{k}={v}" for k, v in kwargs.items())
+                results.append({"index": i, "status": "ok",
+                                "action": "configure_digital",
+                                "name": op["name"], "changes": changes})
+
+            elif action == "get_info":
+                info = _tags.get_alarm_digital_info(
+                    prj, op["name"],
+                    scope=op_scope, program_name=op_prog,
+                )
+                results.append({"index": i, "status": "ok",
+                                "action": "get_info", "data": info})
+
+            elif action == "get_conditions":
+                conditions = _tags.get_tag_alarm_conditions(
+                    prj, op["name"],
+                    scope=op_scope, program_name=op_prog,
+                )
+                results.append({"index": i, "status": "ok",
+                                "action": "get_conditions", "data": conditions})
+
+            elif action == "configure_condition":
+                kwargs = {}
+                if "severity" in op and op["severity"] is not None:
+                    kwargs["severity"] = op["severity"]
+                if "on_delay" in op and op["on_delay"] is not None:
+                    kwargs["on_delay"] = op["on_delay"]
+                if "off_delay" in op and op["off_delay"] is not None:
+                    kwargs["off_delay"] = op["off_delay"]
+                if "used" in op:
+                    val = op["used"]
+                    kwargs["used"] = (
+                        val if isinstance(val, bool)
+                        else str(val).lower() == "true"
+                    )
+                if "ack_required" in op:
+                    val = op["ack_required"]
+                    kwargs["ack_required"] = (
+                        val if isinstance(val, bool)
+                        else str(val).lower() == "true"
+                    )
+                if "message" in op and op["message"]:
+                    kwargs["message"] = op["message"]
+
+                _tags.configure_tag_alarm_condition(
+                    prj, op["tag_name"], op["condition_name"],
+                    scope=op_scope, program_name=op_prog,
+                    **kwargs,
+                )
+                changes = ", ".join(f"{k}={v}" for k, v in kwargs.items())
+                results.append({"index": i, "status": "ok",
+                                "action": "configure_condition",
+                                "tag": op["tag_name"],
+                                "condition": op["condition_name"],
+                                "changes": changes})
+
+            else:
+                results.append({"index": i, "status": "error",
+                                "message": f"Unknown action: {action}"})
+        except Exception as e:
+            results.append({"index": i, "status": "error", "action": action,
+                            "message": str(e)})
+
+    succeeded = sum(1 for r in results if r["status"] == "ok")
+    failed = sum(1 for r in results if r["status"] == "error")
+    return json.dumps(
+        {"succeeded": succeeded, "failed": failed, "details": results},
+        indent=2,
+    )
 
 
 @mcp.tool()
-def batch_create_alarm_digital_tags(
-    tag_specs_json: str,
-    scope: str = "controller",
-    program_name: str = "",
+def manage_alarm_definitions(
+    action: str,
+    data_type_name: str = "",
+    members_json: str = "",
 ) -> str:
-    """Create multiple ALARM_DIGITAL tags from a JSON array.
+    """Manage DatatypeAlarmDefinitions for data types (UDTs/AOIs).
 
-    Each spec object should have: name, message, and optionally severity
-    (default 500), description, ack_required (default true), latched (default false).
-
-    Example: [{"name": "AlarmMotor1", "message": "Motor 1 Fault"},
-              {"name": "AlarmMotor2", "message": "Motor 2 Fault", "severity": 750}]
+    Replaces the former list_alarm_definitions, create_alarm_definition,
+    and remove_alarm_definition tools.
 
     Args:
-        tag_specs_json: JSON array of alarm specification objects.
-        scope: Default scope for all tags.
-        program_name: Default program name for all tags.
+        action: 'list', 'create', 'remove', or 'get'.
+        data_type_name: Required for 'create', 'remove', and 'get'.
+        members_json: Required for 'create'. JSON array of member alarm
+            definition objects. Each should have: name, input (starts with '.'),
+            condition_type, and optionally: severity (default 500),
+            on_delay (default 0), off_delay (default 0), message,
+            ack_required (default false), expression (default '= 1').
     """
     prj = _require_project()
     try:
-        specs = json.loads(tag_specs_json)
-        created = _tags.batch_create_alarm_digital_tags(
-            prj, specs, scope=scope, program_name=program_name or None,
-        )
-        return f"Created {len(created)} ALARM_DIGITAL tags"
+        if action == "list":
+            results = prj.list_alarm_definitions()
+            if not results:
+                return "No alarm definitions found in the project."
+            return json.dumps(results, indent=2)
+
+        elif action == "get":
+            if not data_type_name:
+                return "Error: data_type_name is required for action='get'."
+            result = prj.get_alarm_definition(data_type_name)
+            return json.dumps(result, indent=2)
+
+        elif action == "create":
+            if not data_type_name:
+                return "Error: data_type_name is required for action='create'."
+            if not members_json:
+                return "Error: members_json is required for action='create'."
+            members = json.loads(members_json)
+            prj.create_alarm_definition(data_type_name, members)
+            return (
+                f"Created alarm definition for '{data_type_name}' "
+                f"with {len(members)} member alarm(s)"
+            )
+
+        elif action == "remove":
+            if not data_type_name:
+                return "Error: data_type_name is required for action='remove'."
+            removed = prj.remove_alarm_definition(data_type_name)
+            count = len(removed.findall("MemberAlarmDefinition"))
+            return (
+                f"Removed alarm definition for '{data_type_name}' "
+                f"({count} member alarm(s) removed)"
+            )
+
+        else:
+            return (
+                f"Error: Unknown action '{action}'. "
+                f"Choose from: list, create, remove, get."
+            )
     except Exception as e:
-        return f"Error in batch create: {e}"
-
-
-@mcp.tool()
-def get_alarm_digital_info(
-    name: str,
-    scope: str = "controller",
-    program_name: str = "",
-) -> str:
-    """Get the configuration of an ALARM_DIGITAL or ALARM_ANALOG tag.
-
-    Returns severity, message text, ack_required, latched, and all
-    parameter values as JSON.
-
-    Args:
-        name: Tag name of the ALARM_DIGITAL/ALARM_ANALOG tag.
-        scope: 'controller' or 'program'.
-        program_name: Required when scope is 'program'.
-    """
-    prj = _require_project()
-    try:
-        info = _tags.get_alarm_digital_info(
-            prj, name, scope=scope, program_name=program_name or None,
-        )
-        return json.dumps(info, indent=2)
-    except Exception as e:
-        return f"Error getting alarm info: {e}"
-
-
-@mcp.tool()
-def configure_alarm_digital_tag(
-    name: str,
-    scope: str = "controller",
-    program_name: str = "",
-    severity: int = -1,
-    message: str = "",
-    ack_required: str = "",
-    latched: str = "",
-) -> str:
-    """Update configuration on an existing ALARM_DIGITAL tag.
-
-    Only specified parameters are modified; others are left unchanged.
-    Pass severity=-1 to leave unchanged. Pass empty string for message/
-    ack_required/latched to leave unchanged.
-
-    Args:
-        name: Tag name of the ALARM_DIGITAL tag.
-        scope: 'controller' or 'program'.
-        program_name: Required when scope is 'program'.
-        severity: New severity (1-1000). -1 to leave unchanged.
-        message: New alarm message text. Empty to leave unchanged.
-        ack_required: 'true' or 'false'. Empty to leave unchanged.
-        latched: 'true' or 'false'. Empty to leave unchanged.
-    """
-    prj = _require_project()
-    try:
-        kwargs: dict = {}
-        if severity >= 0:
-            kwargs['severity'] = severity
-        if message:
-            kwargs['message'] = message
-        if ack_required:
-            kwargs['ack_required'] = ack_required.lower() == 'true'
-        if latched:
-            kwargs['latched'] = latched.lower() == 'true'
-
-        _tags.configure_alarm_digital_tag(
-            prj, name, scope=scope, program_name=program_name or None,
-            **kwargs,
-        )
-        changes = ', '.join(f'{k}={v}' for k, v in kwargs.items())
-        return f"Updated ALARM_DIGITAL tag '{name}': {changes}"
-    except Exception as e:
-        return f"Error configuring alarm: {e}"
+        return f"Error managing alarm definitions: {e}"
 
 
 @mcp.tool()
@@ -1403,497 +1383,152 @@ def list_alarms(
         return f"Error listing alarms: {e}"
 
 
-@mcp.tool()
-def list_alarm_definitions() -> str:
-    """List all DatatypeAlarmDefinitions in the project.
-
-    Returns each data type that has alarm definitions, along with the
-    count and names of its MemberAlarmDefinitions.
-    """
-    prj = _require_project()
-    try:
-        results = prj.list_alarm_definitions()
-        if not results:
-            return "No alarm definitions found in the project."
-        return json.dumps(results, indent=2)
-    except Exception as e:
-        return f"Error listing alarm definitions: {e}"
-
-
-@mcp.tool()
-def get_tag_alarm_conditions(
-    name: str,
-    scope: str = "controller",
-    program_name: str = "",
-) -> str:
-    """Get all alarm conditions on a tag.
-
-    Returns the AlarmCondition elements attached to the tag, including
-    name, condition type, input, severity, delay settings, and used status.
-
-    Args:
-        name: Tag name.
-        scope: 'controller' or 'program'.
-        program_name: Required when scope is 'program'.
-    """
-    prj = _require_project()
-    try:
-        conditions = _tags.get_tag_alarm_conditions(
-            prj, name, scope=scope, program_name=program_name or None,
-        )
-        if not conditions:
-            return f"Tag '{name}' has no alarm conditions."
-        return json.dumps(conditions, indent=2)
-    except Exception as e:
-        return f"Error getting alarm conditions: {e}"
-
-
-@mcp.tool()
-def configure_tag_alarm_condition(
-    tag_name: str,
-    condition_name: str,
-    scope: str = "controller",
-    program_name: str = "",
-    severity: int = -1,
-    on_delay: int = -1,
-    off_delay: int = -1,
-    used: str = "",
-    ack_required: str = "",
-    message: str = "",
-) -> str:
-    """Update settings on a specific alarm condition within a tag.
-
-    Modifies an existing AlarmCondition element on a tag. Only specified
-    parameters are modified; pass -1 or empty string to leave unchanged.
-
-    Args:
-        tag_name: Tag name containing the alarm conditions.
-        condition_name: Name of the specific AlarmCondition to modify.
-        scope: 'controller' or 'program'.
-        program_name: Required when scope is 'program'.
-        severity: New severity (1-1000). -1 to leave unchanged.
-        on_delay: On delay in ms. -1 to leave unchanged.
-        off_delay: Off delay in ms. -1 to leave unchanged.
-        used: 'true' or 'false'. Empty to leave unchanged.
-        ack_required: 'true' or 'false'. Empty to leave unchanged.
-        message: Alarm message text. Empty to leave unchanged.
-    """
-    prj = _require_project()
-    try:
-        kwargs: dict = {}
-        if severity >= 0:
-            kwargs['severity'] = severity
-        if on_delay >= 0:
-            kwargs['on_delay'] = on_delay
-        if off_delay >= 0:
-            kwargs['off_delay'] = off_delay
-        if used:
-            kwargs['used'] = used.lower() == 'true'
-        if ack_required:
-            kwargs['ack_required'] = ack_required.lower() == 'true'
-        if message:
-            kwargs['message'] = message
-
-        _tags.configure_tag_alarm_condition(
-            prj, tag_name, condition_name,
-            scope=scope, program_name=program_name or None,
-            **kwargs,
-        )
-        changes = ', '.join(f'{k}={v}' for k, v in kwargs.items())
-        return (
-            f"Updated alarm condition '{condition_name}' on tag "
-            f"'{tag_name}': {changes}"
-        )
-    except Exception as e:
-        return f"Error configuring alarm condition: {e}"
-
-
-@mcp.tool()
-def create_alarm_definition(
-    data_type_name: str,
-    members_json: str,
-) -> str:
-    """Create a DatatypeAlarmDefinition for a data type (UDT or AOI).
-
-    Defines alarm conditions that will be automatically generated on every
-    tag of this data type. Each member object should have: name, input
-    (must start with '.'), condition_type, and optionally: severity (default
-    500), on_delay (default 0), off_delay (default 0), message, ack_required
-    (default false), expression (default '= 1').
-
-    Args:
-        data_type_name: Name of the data type to add alarm definitions to.
-        members_json: JSON array of member alarm definition objects.
-    """
-    prj = _require_project()
-    try:
-        members = json.loads(members_json)
-        prj.create_alarm_definition(data_type_name, members)
-        return (
-            f"Created alarm definition for '{data_type_name}' "
-            f"with {len(members)} member alarm(s)"
-        )
-    except Exception as e:
-        return f"Error creating alarm definition: {e}"
-
-
-@mcp.tool()
-def remove_alarm_definition(data_type_name: str) -> str:
-    """Remove a DatatypeAlarmDefinition from the project.
-
-    Removes the alarm definition for the specified data type. This does NOT
-    remove AlarmConditions from existing tags of that type.
-
-    Args:
-        data_type_name: Name of the data type whose alarm definition to remove.
-    """
-    prj = _require_project()
-    try:
-        removed = prj.remove_alarm_definition(data_type_name)
-        count = len(removed.findall('MemberAlarmDefinition'))
-        return (
-            f"Removed alarm definition for '{data_type_name}' "
-            f"({count} member alarm(s) removed)"
-        )
-    except Exception as e:
-        return f"Error removing alarm definition: {e}"
-
-
 # ===================================================================
-# 9. Component Export / Import
+# 8. Component Export (consolidated)
 # ===================================================================
 
-# --- Create from scratch ---
-
 @mcp.tool()
-def create_rung_export(
-    program_name: str = "ExportedProgram",
-    routine_name: str = "MainRoutine",
-) -> str:
-    """Create an empty Rung export file in memory and load it as the active project.
-
-    The resulting in-memory project has TargetType='Rung' and can be
-    populated with add_rung, create_tag, etc., then saved with save_project.
-
-    Args:
-        program_name: Name for the context program.
-        routine_name: Name for the context routine.
-    """
-    global _project, _project_path
-    try:
-        source = _project if _project is not None else None
-        prj = _comp_export.create_rung_export(
-            project=source,
-            program_name=program_name,
-            routine_name=routine_name,
-        )
-        _project = prj
-        _project_path = None
-        return (
-            f"Created empty Rung export in memory "
-            f"(program='{program_name}', routine='{routine_name}'). "
-            f"Use add_rung/create_tag to populate, then save_project to write."
-        )
-    except Exception as e:
-        return f"Error creating rung export: {e}"
-
-
-@mcp.tool()
-def create_routine_export(
+def create_export_shell(
+    export_type: str,
     program_name: str = "ExportedProgram",
     routine_name: str = "MainRoutine",
     routine_type: str = "RLL",
 ) -> str:
-    """Create an empty Routine export file in memory and load it as the active project.
+    """Create an empty export shell in memory and load it as the active project.
+
+    Replaces the former create_rung_export, create_routine_export, and
+    create_program_export tools.
+
+    The resulting in-memory project can be populated with manage_tags,
+    manage_rungs, etc., then written out with save_project.
 
     Args:
+        export_type: Type of export shell -- 'rung', 'routine', or 'program'.
         program_name: Name for the context program.
-        routine_name: Name for the target routine.
-        routine_type: Routine type ('RLL', 'ST', 'FBD', or 'SFC').
+        routine_name: Name for the context routine (rung/routine types).
+        routine_type: Routine type for routine exports ('RLL', 'ST', etc.).
     """
     global _project, _project_path
     try:
         source = _project if _project is not None else None
-        prj = _comp_export.create_routine_export(
-            project=source,
-            program_name=program_name,
-            routine_name=routine_name,
-            routine_type=routine_type,
-        )
+
+        if export_type == "rung":
+            prj = _comp_export.create_rung_export(
+                project=source,
+                program_name=program_name,
+                routine_name=routine_name,
+            )
+        elif export_type == "routine":
+            prj = _comp_export.create_routine_export(
+                project=source,
+                program_name=program_name,
+                routine_name=routine_name,
+                routine_type=routine_type,
+            )
+        elif export_type == "program":
+            prj = _comp_export.create_program_export(
+                project=source,
+                program_name=program_name,
+            )
+        else:
+            return (
+                f"Error: Unknown export_type '{export_type}'. "
+                f"Choose from: rung, routine, program."
+            )
+
         _project = prj
         _project_path = None
         return (
-            f"Created empty Routine export in memory "
-            f"(routine='{routine_name}', type={routine_type}). "
-            f"Use add_rung/create_tag to populate, then save_project to write."
-        )
-    except Exception as e:
-        return f"Error creating routine export: {e}"
-
-
-@mcp.tool()
-def create_program_export(
-    program_name: str = "ExportedProgram",
-) -> str:
-    """Create an empty Program export file in memory and load it as the active project.
-
-    The program includes an empty MainRoutine (RLL type).
-
-    Args:
-        program_name: Name for the target program.
-    """
-    global _project, _project_path
-    try:
-        source = _project if _project is not None else None
-        prj = _comp_export.create_program_export(
-            project=source,
-            program_name=program_name,
-        )
-        _project = prj
-        _project_path = None
-        return (
-            f"Created empty Program export in memory "
+            f"Created empty {export_type} export in memory "
             f"(program='{program_name}'). "
-            f"Use add_rung/create_tag/create_routine to populate, "
-            f"then save_project to write."
+            f"Use manage_tags/manage_rungs to populate, then save_project."
         )
     except Exception as e:
-        return f"Error creating program export: {e}"
-
-
-# --- Extract from project ---
-
-@mcp.tool()
-def export_rung(
-    program_name: str,
-    routine_name: str,
-    rung_numbers: str,
-    file_path: str = "",
-    include_tags: bool = True,
-) -> str:
-    """Extract specific rungs from a routine into a standalone Rung export file.
-
-    Includes the specified rungs along with referenced tags, UDT
-    definitions, and AOI definitions as context dependencies.
-
-    Args:
-        program_name: Program containing the routine.
-        routine_name: Name of the RLL routine.
-        rung_numbers: Comma-separated rung indices (e.g. '0,1,2' or '5').
-        file_path: Output file path. If empty, auto-generates a name.
-        include_tags: Whether to include referenced tags and dependencies.
-    """
-    prj = _require_project()
-    try:
-        nums = [int(n.strip()) for n in rung_numbers.split(',') if n.strip()]
-        fp = _normalize_path(file_path) if file_path else ""
-        result = _comp_export.export_rung(
-            prj, program_name, routine_name, nums,
-            file_path=fp,
-            include_tags=include_tags,
-        )
-        return f"Exported {len(nums)} rung(s) to: {result}"
-    except Exception as e:
-        return f"Error exporting rungs: {e}"
+        return f"Error creating export shell: {e}"
 
 
 @mcp.tool()
-def export_routine(
-    program_name: str,
-    routine_name: str,
-    file_path: str = "",
-    include_tags: bool = True,
-) -> str:
-    """Extract an entire routine into a standalone Routine export file.
-
-    Includes all rungs/lines and referenced dependencies.
-
-    Args:
-        program_name: Program containing the routine.
-        routine_name: Name of the routine.
-        file_path: Output file path. If empty, auto-generates a name.
-        include_tags: Whether to include referenced tags.
-    """
-    prj = _require_project()
-    try:
-        fp = _normalize_path(file_path) if file_path else ""
-        result = _comp_export.export_routine(
-            prj, program_name, routine_name,
-            file_path=fp,
-            include_tags=include_tags,
-        )
-        return f"Exported routine '{routine_name}' to: {result}"
-    except Exception as e:
-        return f"Error exporting routine: {e}"
-
-
-@mcp.tool()
-def export_program(
-    program_name: str,
-    file_path: str = "",
-) -> str:
-    """Extract an entire program into a standalone Program export file.
-
-    Includes all program tags, routines, and referenced controller-scope
-    tags, UDTs, and AOIs.
-
-    Args:
-        program_name: Name of the program to export.
-        file_path: Output file path. If empty, auto-generates a name.
-    """
-    prj = _require_project()
-    try:
-        fp = _normalize_path(file_path) if file_path else ""
-        result = _comp_export.export_program(
-            prj, program_name,
-            file_path=fp,
-        )
-        return f"Exported program '{program_name}' to: {result}"
-    except Exception as e:
-        return f"Error exporting program: {e}"
-
-
-@mcp.tool()
-def export_tag(
-    tag_name: str,
-    scope: str = "controller",
+def export_component(
+    component_type: str,
+    name: str = "",
     program_name: str = "",
+    routine_name: str = "",
+    scope: str = "controller",
     file_path: str = "",
+    include_tags: bool = True,
 ) -> str:
-    """Extract a tag into a standalone export file.
+    """Extract a component from the project into a standalone L5X export file.
 
-    Tags are exported in a Rung-type shell (L5X has no standalone Tag
-    export type). The tag's data type dependencies (UDTs, AOIs) are included.
+    Replaces the former export_rung, export_routine, export_program,
+    export_tag, export_udt, and export_aoi tools.
 
     Args:
-        tag_name: Name of the tag to export.
-        scope: 'controller' or 'program'.
-        program_name: Required when scope is 'program'.
+        component_type: What to export -- 'rung', 'routine', 'program',
+                        'tag', 'udt', 'aoi'.
+        name: Entity name or identifiers:
+              - For rungs: comma-separated rung indices (e.g. '0,1,2').
+              - For routine/program/tag/udt/aoi: the entity name.
+        program_name: Program containing the routine/rungs, or the
+                      program for program-scope tags.
+        routine_name: Routine name (for rung/routine exports).
+        scope: Tag scope ('controller' or 'program'). Only for tag exports.
         file_path: Output file path. If empty, auto-generates a name.
+        include_tags: For rung/routine exports, include referenced tags
+                      and type dependencies.
     """
     prj = _require_project()
     try:
         fp = _normalize_path(file_path) if file_path else ""
-        result = _comp_export.export_tag(
-            prj, tag_name,
-            scope=scope,
-            program_name=program_name,
-            file_path=fp,
-        )
-        return f"Exported tag '{tag_name}' to: {result}"
+
+        if component_type == "rung":
+            nums = [int(n.strip()) for n in name.split(",") if n.strip()]
+            result = _comp_export.export_rung(
+                prj, program_name, routine_name, nums,
+                file_path=fp, include_tags=include_tags,
+            )
+            return f"Exported {len(nums)} rung(s) to: {result}"
+
+        elif component_type == "routine":
+            result = _comp_export.export_routine(
+                prj, program_name, routine_name or name,
+                file_path=fp, include_tags=include_tags,
+            )
+            return f"Exported routine '{routine_name or name}' to: {result}"
+
+        elif component_type == "program":
+            result = _comp_export.export_program(
+                prj, program_name or name, file_path=fp,
+            )
+            return f"Exported program '{program_name or name}' to: {result}"
+
+        elif component_type == "tag":
+            result = _comp_export.export_tag(
+                prj, name,
+                scope=scope,
+                program_name=program_name,
+                file_path=fp,
+            )
+            return f"Exported tag '{name}' to: {result}"
+
+        elif component_type == "udt":
+            result = _comp_export.export_udt(
+                prj, name, file_path=fp,
+            )
+            return f"Exported UDT '{name}' to: {result}"
+
+        elif component_type == "aoi":
+            result = _comp_export.export_aoi(
+                prj, name, file_path=fp,
+            )
+            return f"Exported AOI '{name}' to: {result}"
+
+        else:
+            return (
+                f"Error: Unknown component_type '{component_type}'. "
+                f"Choose from: rung, routine, program, tag, udt, aoi."
+            )
     except Exception as e:
-        return f"Error exporting tag: {e}"
-
-
-@mcp.tool()
-def export_udt(
-    udt_name: str,
-    file_path: str = "",
-) -> str:
-    """Extract a UDT definition into a standalone DataType export file.
-
-    Includes transitive UDT dependencies as context.
-
-    Args:
-        udt_name: Name of the UDT to export.
-        file_path: Output file path. If empty, auto-generates a name.
-    """
-    prj = _require_project()
-    try:
-        fp = _normalize_path(file_path) if file_path else ""
-        result = _comp_export.export_udt(
-            prj, udt_name,
-            file_path=fp,
-        )
-        return f"Exported UDT '{udt_name}' to: {result}"
-    except Exception as e:
-        return f"Error exporting UDT: {e}"
-
-
-@mcp.tool()
-def export_aoi(
-    aoi_name: str,
-    file_path: str = "",
-) -> str:
-    """Extract an AOI definition into a standalone AOI export file.
-
-    Includes dependent UDTs and nested AOIs. Updates the EditedDate.
-
-    Args:
-        aoi_name: Name of the AOI to export.
-        file_path: Output file path. If empty, auto-generates a name.
-    """
-    prj = _require_project()
-    try:
-        fp = _normalize_path(file_path) if file_path else ""
-        result = _comp_export.export_aoi(
-            prj, aoi_name,
-            file_path=fp,
-        )
-        return f"Exported AOI '{aoi_name}' to: {result}"
-    except Exception as e:
-        return f"Error exporting AOI: {e}"
-
-
-# --- Import with validation ---
-
-@mcp.tool()
-def analyze_import(file_path: str) -> str:
-    """Dry-run conflict analysis for importing a component export file.
-
-    Checks for UDT/AOI definition mismatches, tag type conflicts,
-    and name collisions without making any changes to the project.
-
-    Args:
-        file_path: Path to the component export .L5X file.
-    """
-    prj = _require_project()
-    try:
-        fp = _normalize_path(file_path)
-        result = _comp_import.analyze_import(prj, fp)
-        return json.dumps(result.to_dict(), indent=2)
-    except Exception as e:
-        return f"Error analyzing import: {e}"
-
-
-@mcp.tool()
-def import_component(
-    file_path: str,
-    conflict_resolution: str = "report",
-    target_program: str = "",
-    target_routine: str = "",
-    rung_position: int = -1,
-) -> str:
-    """Import a component export file into the loaded project.
-
-    Automatically detects the component type (Rung, Routine, Program,
-    DataType, AddOnInstructionDefinition) and imports with conflict
-    detection and resolution.
-
-    Args:
-        file_path: Path to the component export .L5X file.
-        conflict_resolution: How to handle conflicts:
-            'report' = dry run (return conflicts only, no changes),
-            'skip' = import non-conflicting items and skip conflicts,
-            'overwrite' = replace existing items with imported versions,
-            'fail' = abort on any conflict.
-        target_program: Override target program name (for Rung/Routine imports).
-        target_routine: Override target routine name (for Rung imports).
-        rung_position: Insert position for rungs (0-based). -1 to append.
-    """
-    prj = _require_project()
-    try:
-        fp = _normalize_path(file_path)
-        result = _comp_import.import_component(
-            prj, fp,
-            conflict_resolution=conflict_resolution,
-            target_program=target_program,
-            target_routine=target_routine,
-            rung_position=rung_position,
-        )
-        return json.dumps(result.to_dict(), indent=2)
-    except Exception as e:
-        return f"Error importing component: {e}"
+        return f"Error exporting component: {e}"
 
 
 # ---------------------------------------------------------------------------
