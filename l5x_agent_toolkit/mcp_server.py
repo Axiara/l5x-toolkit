@@ -25,6 +25,7 @@ import sys
 from typing import Optional
 from urllib.parse import unquote, urlparse
 
+from lxml import etree
 from mcp.server.fastmcp import FastMCP
 
 # ---------------------------------------------------------------------------
@@ -440,7 +441,7 @@ def get_entity_info(
             # Add member value if a member path was specified
             if member_path:
                 effective_scope = info.get("scope", scope) or scope
-                effective_prog = info.get("program") or prog
+                effective_prog = info.get("program_name") or prog
                 member_val = prj.get_tag_member_value(
                     base_name, member_path,
                     scope=effective_scope,
@@ -454,7 +455,7 @@ def get_entity_info(
                 info["references"] = prj.find_tag_references(base_name)
             if "alarm_conditions" in include_set:
                 effective_scope = info.get("scope", scope) or scope
-                effective_prog = info.get("program") or prog
+                effective_prog = info.get("program_name") or prog
                 info["alarm_conditions"] = _tags.get_tag_alarm_conditions(
                     prj, base_name,
                     scope=effective_scope,
@@ -1322,7 +1323,9 @@ def manage_alarm_definitions(
             if not data_type_name:
                 return "Error: data_type_name is required for action='get'."
             result = prj.get_alarm_definition(data_type_name)
-            return json.dumps(result, indent=2)
+            if result is None:
+                return f"No alarm definition found for '{data_type_name}'."
+            return etree.tostring(result, pretty_print=True).decode()
 
         elif action == "create":
             if not data_type_name:
