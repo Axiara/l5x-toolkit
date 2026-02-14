@@ -18,6 +18,7 @@ Error severity:
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Dict, List, Optional, Set
 
@@ -38,6 +39,8 @@ from .schema import (
 )
 from .utils import get_description
 from .rungs import validate_rung_syntax, extract_tag_references
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -1203,6 +1206,7 @@ def validate_project(project) -> ValidationResult:
         A :class:`ValidationResult` containing all discovered errors and
         warnings.
     """
+    logger.info("Running project validation")
     result = ValidationResult()
 
     # 1. Structural checks
@@ -1253,4 +1257,5 @@ def validate_project(project) -> ValidationResult:
                     for tag in prog_tags.findall("Tag"):
                         result.merge(validate_tag(project, tag))
 
+    logger.info("Validation complete: %d errors, %d warnings", len(result.errors), len(result.warnings))
     return result

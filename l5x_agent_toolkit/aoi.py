@@ -14,6 +14,7 @@ Each AOI definition contains Parameters, LocalTags, and Routines sub-elements.
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -34,6 +35,8 @@ from .utils import (
     parse_l5x,
     set_cdata_text,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +420,7 @@ def import_aoi(
             or if ``overwrite`` is False and the AOI already exists.
         etree.XMLSyntaxError: If the source file contains malformed XML.
     """
+    logger.info("Importing AOI from %r", file_path)
     source_root = parse_l5x(file_path)
 
     # Locate the AOI definition in the source file.
@@ -511,6 +515,7 @@ def get_aoi_info(project, name: str) -> dict:
     Raises:
         ValueError: If the AOI is not found.
     """
+    logger.info("Querying AOI info for %r", name)
     aoi_elem = _find_aoi_element(project, name)
     if aoi_elem is None:
         raise ValueError(f"AOI '{name}' not found in the project.")

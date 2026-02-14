@@ -40,6 +40,7 @@ from . import udt as _udt
 from . import validator as _validator
 from . import component_export as _comp_export
 from . import component_import as _comp_import
+from .models import Scope, RoutineType
 
 # ---------------------------------------------------------------------------
 # Logging (stderr only -- stdout is reserved for MCP protocol)
@@ -331,20 +332,20 @@ def query_project(
                 result["routines"] = prj.list_routines(program_name)
             elif ent == "tags":
                 tags: list = []
-                if scope in ("controller", ""):
+                if scope in (Scope.CONTROLLER, ""):
                     for t in prj.list_controller_tags():
-                        t["scope"] = "controller"
+                        t["scope"] = Scope.CONTROLLER
                         tags.append(t)
-                if scope in ("program", ""):
+                if scope in (Scope.PROGRAM, ""):
                     if program_name:
                         for t in prj.list_program_tags(program_name):
-                            t["scope"] = "program"
+                            t["scope"] = Scope.PROGRAM
                             t["program"] = program_name
                             tags.append(t)
-                    elif scope == "" or scope == "program":
+                    elif scope == "" or scope == Scope.PROGRAM:
                         for p in prj.list_programs():
                             for t in prj.list_program_tags(p):
-                                t["scope"] = "program"
+                                t["scope"] = Scope.PROGRAM
                                 t["program"] = p
                                 tags.append(t)
                 result["tags"] = tags
@@ -386,7 +387,7 @@ def query_project(
 def get_entity_info(
     entity: str,
     name: str,
-    scope: str = "controller",
+    scope: str = Scope.CONTROLLER,
     program_name: str = "",
     routine_name: str = "",
     include: str = "",
@@ -531,7 +532,7 @@ def find_tag_references(tag_name: str) -> str:
 @mcp.tool()
 def manage_tags(
     operations_json: str,
-    scope: str = "controller",
+    scope: str = Scope.CONTROLLER,
     program_name: str = "",
 ) -> str:
     """Execute one or more tag CRUD operations in sequence.
@@ -657,7 +658,7 @@ def manage_tags(
 @mcp.tool()
 def update_tags(
     updates_json: str,
-    scope: str = "controller",
+    scope: str = Scope.CONTROLLER,
     program_name: str = "",
 ) -> str:
     """Set values, member values, and descriptions on one or more tags.
@@ -787,7 +788,7 @@ def delete_program(name: str) -> str:
 def create_routine(
     program_name: str,
     routine_name: str,
-    routine_type: str = "RLL",
+    routine_type: str = RoutineType.RLL,
 ) -> str:
     """Create a new routine in a program.
 
@@ -1131,7 +1132,7 @@ def analyze_rung_text(
 @mcp.tool()
 def manage_alarms(
     operations_json: str,
-    scope: str = "controller",
+    scope: str = Scope.CONTROLLER,
     program_name: str = "",
 ) -> str:
     """Create, configure, and inspect alarm tags in a single call.
@@ -1392,7 +1393,7 @@ def create_export_shell(
     export_type: str,
     program_name: str = "ExportedProgram",
     routine_name: str = "MainRoutine",
-    routine_type: str = "RLL",
+    routine_type: str = RoutineType.RLL,
 ) -> str:
     """Create an empty export shell in memory and load it as the active project.
 
@@ -1453,7 +1454,7 @@ def export_component(
     name: str = "",
     program_name: str = "",
     routine_name: str = "",
-    scope: str = "controller",
+    scope: str = Scope.CONTROLLER,
     file_path: str = "",
     include_tags: bool = True,
 ) -> str:
@@ -1713,7 +1714,7 @@ def get_scope_references(
                     entry['scope'] = info.get('scope', '')
                     entry['program'] = info.get('program', '')
                     entry['description'] = info.get('description', '')
-                    if info.get('scope') == 'controller':
+                    if info.get('scope') == Scope.CONTROLLER:
                         ctrl_count += 1
                     else:
                         prog_count += 1
@@ -1822,24 +1823,7 @@ def find_references(
         elif entity_type == "udt":
             # For UDTs, find all tags whose DataType matches
             for name in names:
-                matches = []
-                # Controller tags
-                for t in prj.list_controller_tags():
-                    if t.get('data_type', '').lower() == name.lower():
-                        matches.append({
-                            'tag_name': t['name'],
-                            'scope': 'controller',
-                        })
-                # Program tags
-                for p in prj.list_programs():
-                    for t in prj.list_program_tags(p):
-                        if t.get('data_type', '').lower() == name.lower():
-                            matches.append({
-                                'tag_name': t['name'],
-                                'scope': 'program',
-                                'program': p,
-                            })
-                result[name] = matches
+                result[name] = prj.tags.find_by_data_type(name)
 
         else:
             return (
@@ -1855,7 +1839,7 @@ def find_references(
 @mcp.tool()
 def get_tag_values(
     names_json: str,
-    scope: str = "controller",
+    scope: str = Scope.CONTROLLER,
     program_name: str = "",
     include_members: bool = False,
     include_aoi_context: bool = False,
@@ -1901,9 +1885,9 @@ def get_tag_values(
         # If names is empty but name_filter is provided, discover names
         if not names and name_filter:
             all_tags = []
-            if scope in ('controller', ''):
+            if scope in (Scope.CONTROLLER, ''):
                 all_tags.extend(prj.list_controller_tags())
-            if scope in ('program', ''):
+            if scope in (Scope.PROGRAM, ''):
                 if program_name:
                     all_tags.extend(prj.list_program_tags(program_name))
                 elif scope == '':
@@ -2088,26 +2072,7 @@ def compare_tag_instances(
                 return json.dumps({"Error": "filter_members_json must be a JSON object of {member: value} pairs."})
 
         # Collect all tags of the specified data type
-        instances: list[dict] = []
-
-        if scope in ('', 'controller'):
-            for t in prj.list_controller_tags():
-                if t.get('data_type', '').lower() == data_type.lower():
-                    instances.append({
-                        'tag_name': t['name'],
-                        'scope': 'controller',
-                    })
-
-        if scope in ('', 'program'):
-            programs = [program_name] if program_name else prj.list_programs()
-            for p in programs:
-                for t in prj.list_program_tags(p):
-                    if t.get('data_type', '').lower() == data_type.lower():
-                        instances.append({
-                            'tag_name': t['name'],
-                            'scope': 'program',
-                            'program': p,
-                        })
+        instances = prj.tags.find_by_data_type(data_type, scope=scope, program_name=program_name)
 
         # All member names we need to read (match + filter)
         all_members = list(set(match_members) | set(filter_members.keys()))
@@ -2300,10 +2265,10 @@ def detect_conflicts(
         # Unused Tags
         # ---------------------------------------------------------------
         if 'unused_tags' in checks:
-            unused_ctrl = prj.find_unused_tags(scope='controller')
+            unused_ctrl = prj.find_unused_tags(scope=Scope.CONTROLLER)
             unused_prog: dict[str, list] = {}
             for p in prj.list_programs():
-                unused = prj.find_unused_tags(scope='program', program_name=p)
+                unused = prj.find_unused_tags(scope=Scope.PROGRAM, program_name=p)
                 if unused:
                     unused_prog[p] = unused
 

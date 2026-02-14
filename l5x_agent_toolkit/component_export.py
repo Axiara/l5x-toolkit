@@ -17,6 +17,7 @@ Supported component types:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from datetime import datetime, timezone
@@ -39,6 +40,8 @@ from .utils import (
     insert_in_order,
     set_element_cdata,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -833,6 +836,7 @@ def export_rung(
         KeyError: If the program, routine, or rung does not exist.
         ValueError: If the routine is not RLL.
     """
+    logger.info("Exporting rungs %s from %s/%s", rung_numbers, program_name, routine_name)
     meta = _get_export_metadata(project)
 
     # Get the source rung elements
@@ -942,6 +946,7 @@ def export_routine(
     Raises:
         KeyError: If the program or routine does not exist.
     """
+    logger.info("Exporting routine '%s' from program '%s'", routine_name, program_name)
     meta = _get_export_metadata(project)
     routine = project.get_routine_element(program_name, routine_name)
     routine_type = project._infer_routine_type(routine)
@@ -1026,6 +1031,7 @@ def export_program(
     Raises:
         KeyError: If the program does not exist.
     """
+    logger.info("Exporting program '%s'", program_name)
     meta = _get_export_metadata(project)
     program_el = project.get_program_element(program_name)
     program_class = program_el.get('Class', 'Standard')
@@ -1119,6 +1125,7 @@ def export_tag(
     Raises:
         KeyError: If the tag does not exist.
     """
+    logger.info("Exporting tag '%s' from scope '%s'", tag_name, scope)
     meta = _get_export_metadata(project)
     tag_el = project.get_tag_element(tag_name, scope, program_name or None)
 
@@ -1182,6 +1189,7 @@ def export_udt(
     Raises:
         KeyError: If the UDT does not exist.
     """
+    logger.info("Exporting UDT '%s'", udt_name)
     meta = _get_export_metadata(project)
     udt_el = project.get_data_type_element(udt_name)
 
@@ -1236,6 +1244,7 @@ def export_aoi(
     Raises:
         KeyError: If the AOI does not exist.
     """
+    logger.info("Exporting AOI '%s'", aoi_name)
     from .aoi import _update_edited_date
 
     meta = _get_export_metadata(project)

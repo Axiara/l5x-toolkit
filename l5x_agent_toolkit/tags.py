@@ -23,6 +23,7 @@ Add-On Instruction backing tags, and arrays of any of those types.
 from __future__ import annotations
 
 import copy
+import logging
 import re
 from typing import Any, Dict, List, Optional, Union
 
@@ -48,6 +49,8 @@ from .schema import (
     ALARM_SEVERITY_MAX,
     TAG_CHILD_ORDER,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +503,7 @@ def create_tag(
         ValueError: If *name* is invalid or tag already exists.
         KeyError: If *data_type* is not recognized, or program not found.
     """
+    logger.info("Creating tag %r (type=%s, scope=%s)", name, data_type, scope)
     # Validate the tag name.
     validate_tag_name(name)
 
@@ -601,6 +605,7 @@ def delete_tag(
     Raises:
         KeyError: If the tag does not exist in the specified scope.
     """
+    logger.info("Deleting tag %r (scope=%s)", name, scope or "controller")
     tag_elem = _find_tag_element(project, name, scope, program_name)
     if tag_elem is None:
         scope_desc = (
@@ -643,6 +648,7 @@ def rename_tag(
         KeyError: If the tag does not exist.
         ValueError: If *new_name* is invalid or already exists.
     """
+    logger.info("Renaming tag %r → %r", old_name, new_name)
     # Validate new name.
     validate_tag_name(new_name)
 
@@ -706,6 +712,7 @@ def copy_tag(
         ValueError: If *new_name* is invalid or already exists in the
             destination scope.
     """
+    logger.info("Copying tag %r → %r", source_name, new_name)
     # Validate new name.
     validate_tag_name(new_name)
 
@@ -774,6 +781,7 @@ def move_tag(
         KeyError: If the tag does not exist in the source scope.
         ValueError: If the tag already exists in the destination scope.
     """
+    logger.info("Moving tag %r to %s scope", name, to_scope)
     # Verify the tag exists in the source.
     tag_elem = _find_tag_element(project, name, from_scope, from_program)
     if tag_elem is None:
@@ -829,6 +837,7 @@ def set_tag_value(
         KeyError: If the tag does not exist.
         ValueError: If the tag is not a scalar type.
     """
+    logger.info("Setting value for tag %r", name)
     tag_elem = _find_tag_element(project, name, scope, program_name)
     if tag_elem is None:
         scope_desc = (
@@ -894,6 +903,7 @@ def set_tag_member_value(
     Raises:
         KeyError: If the tag or member does not exist.
     """
+    logger.info("Setting member %r on tag %r", member_path, name)
     tag_elem = _find_tag_element(project, name, scope, program_name)
     if tag_elem is None:
         scope_desc = (
@@ -1259,6 +1269,7 @@ def get_tag_info(
     Raises:
         KeyError: If the tag does not exist.
     """
+    logger.debug("Getting info for tag %r (scope=%s)", name, scope)
     tag_elem = _find_tag_element(project, name, scope, program_name)
     if tag_elem is None:
         scope_desc = (
@@ -1486,6 +1497,7 @@ def create_alias_tag(
     Raises:
         ValueError: If *name* is invalid, empty *alias_for*, or tag exists.
     """
+    logger.info("Creating alias tag %r → %r", name, alias_for)
     validate_tag_name(name)
 
     if not alias_for or not alias_for.strip():
