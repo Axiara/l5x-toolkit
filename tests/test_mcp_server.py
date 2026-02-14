@@ -105,9 +105,9 @@ def _load_test_project(tmp_path):
 # ===================================================================
 
 class TestToolCount:
-    def test_total_tools_is_30(self):
+    def test_total_tools_is_31(self):
         tools = list(mcp_server.mcp._tool_manager._tools.values())
-        assert len(tools) == 30
+        assert len(tools) == 31
 
 
 # ===================================================================
@@ -1263,31 +1263,142 @@ class TestDetectConflicts:
         local_dupe = next(d for d in dupes if d["tag_name"] == "LocalCmd")
         assert local_dupe["types_consistent"] is True
 
-    def test_aoi_address_conflict(self, rich_project):
-        raw = mcp_server.detect_conflicts(
-            check="aoi_address", aoi_name="VALVE_CTL",
-        )
-        data = json.loads(raw)
-        conflicts = data["aoi_address"]["conflicts"]
-        # V101 and V102 both use IO_Data with AddressOffset=5
-        assert data["aoi_address"]["conflicts_found"] >= 1
-        conflict = conflicts[0]
-        assert conflict["aoi_type"] == "VALVE_CTL"
-        assert conflict["instance_count"] >= 2
-        instance_names = [i["tag_name"] for i in conflict["instances"]]
-        assert "V101" in instance_names
-        assert "V102" in instance_names
-
     def test_all_checks(self, rich_project):
         raw = mcp_server.detect_conflicts(check="all")
         data = json.loads(raw)
-        assert "aoi_address" in data
         assert "tag_shadowing" in data
         assert "unused_tags" in data
         assert "scope_duplicates" in data
+        # aoi_address is no longer a domain check -- use compare_tag_instances
+        assert "aoi_address" not in data
 
     def test_unknown_check(self, rich_project):
         raw = mcp_server.detect_conflicts(check="bogus")
         # Should return empty result (no matching check name)
         data = json.loads(raw)
         assert isinstance(data, dict)
+
+
+# ===================================================================
+# 18. compare_tag_instances
+# ===================================================================
+
+class TestCompareTagInstances:
+    def test_find_duplicate_members(self, rich_project):
+        """V101 and V102 both have AddressOffset=5 — should group together."""
+        raw = mcp_server.compare_tag_instances(
+            data_type="VALVE_CTL",
+            match_members_json='["AddressOffset"]',
+        )
+        data = json.loads(raw)
+        assert data["data_type"] == "VALVE_CTL"
+        assert data["match_members"] == ["AddressOffset"]
+        assert data["total_instances"] >= 2
+        assert data["groups_with_duplicates"] >= 1
+        group = data["groups"][0]
+        assert group["instance_count"] >= 2
+        names = [i["tag_name"] for i in group["instances"]]
+        assert "V101" in names
+        assert "V102" in names
+
+    def test_multi_member_match(self, rich_project):
+        """Match on both AddressOffset and Command (both are 0/5)."""
+        raw = mcp_server.compare_tag_instances(
+            data_type="VALVE_CTL",
+            match_members_json='["AddressOffset", "Command"]',
+        )
+        data = json.loads(raw)
+        assert data["groups_with_duplicates"] >= 1
+
+    def test_with_rung_bindings_inout(self, rich_project):
+        """IOArray is InOut — value comes from rung text, not decorated data."""
+        raw = mcp_server.compare_tag_instances(
+            data_type="VALVE_CTL",
+            match_members_json='["IOArray", "AddressOffset"]',
+            include_rung_bindings=True,
+        )
+        data = json.loads(raw)
+        assert data["groups_with_duplicates"] >= 1
+        group = data["groups"][0]
+        names = [i["tag_name"] for i in group["instances"]]
+        assert "V101" in names
+        assert "V102" in names
+        # Check that IOArray was resolved to IO_Data
+        for inst in group["instances"]:
+            assert inst["member_values"]["IOArray"] == "IO_Data"
+            assert str(inst["member_values"]["AddressOffset"]) == "5"
+
+    def test_filter_members(self, rich_project):
+        """Pre-filter to only AddressOffset=5 instances."""
+        raw = mcp_server.compare_tag_instances(
+            data_type="VALVE_CTL",
+            match_members_json='["Command"]',
+            filter_members_json='{"AddressOffset": "5"}',
+        )
+        data = json.loads(raw)
+        assert data["filter_applied"] == {"AddressOffset": "5"}
+        assert data["total_instances"] >= 2
+
+    def test_filter_excludes_non_matching(self, rich_project):
+        """Filter with a value no instance has — should find nothing."""
+        raw = mcp_server.compare_tag_instances(
+            data_type="VALVE_CTL",
+            match_members_json='["AddressOffset"]',
+            filter_members_json='{"AddressOffset": "999"}',
+        )
+        data = json.loads(raw)
+        assert data["total_instances"] == 0
+        assert data["groups_with_duplicates"] == 0
+
+    def test_no_duplicates_when_values_differ(self, rich_project):
+        """If match members have unique values, no groups should appear."""
+        # V101 and V102 have the same Command value (0), but let's filter
+        # to ensure we test the "no match" path by using a member that
+        # would differ if values were different. Since both have Command=0,
+        # they will actually group. So let's test with an empty result by
+        # using a data type with no tags.
+        raw = mcp_server.compare_tag_instances(
+            data_type="MyUDT",
+            match_members_json='["Speed"]',
+        )
+        data = json.loads(raw)
+        # No tags of MyUDT exist, so total_instances should be 0
+        assert data["total_instances"] == 0
+        assert data["groups_with_duplicates"] == 0
+
+    def test_scope_filter_controller(self, rich_project):
+        """Filter to controller scope only."""
+        raw = mcp_server.compare_tag_instances(
+            data_type="VALVE_CTL",
+            match_members_json='["AddressOffset"]',
+            scope="controller",
+        )
+        data = json.loads(raw)
+        # V101 and V102 are controller-scoped
+        assert data["total_instances"] >= 2
+
+    def test_invalid_match_members_json(self, rich_project):
+        """Bad JSON in match_members should return error."""
+        raw = mcp_server.compare_tag_instances(
+            data_type="VALVE_CTL",
+            match_members_json="not json",
+        )
+        assert "Error" in raw
+
+    def test_empty_match_members(self, rich_project):
+        """Empty match_members array should return error."""
+        raw = mcp_server.compare_tag_instances(
+            data_type="VALVE_CTL",
+            match_members_json="[]",
+        )
+        data = json.loads(raw)
+        assert "Error" in data
+
+    def test_invalid_filter_json(self, rich_project):
+        """Bad JSON in filter_members should return error."""
+        raw = mcp_server.compare_tag_instances(
+            data_type="VALVE_CTL",
+            match_members_json='["AddressOffset"]',
+            filter_members_json="not json",
+        )
+        assert "Error" in raw

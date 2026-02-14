@@ -2024,34 +2024,234 @@ def get_tag_values(
 
 
 @mcp.tool()
+def compare_tag_instances(
+    data_type: str,
+    match_members_json: str,
+    filter_members_json: str = "",
+    scope: str = "",
+    program_name: str = "",
+    include_rung_bindings: bool = False,
+) -> str:
+    """Compare structured tag instances to find duplicates across specified members.
+
+    Generic tool for finding tags of a given data type that share the same
+    values for one or more structure members. Works with any data type --
+    AOIs, UDTs, or built-in structured types.
+
+    Example: find VALVE_CTL instances sharing the same IOArray + AddressOffset:
+        data_type = "VALVE_CTL"
+        match_members_json = '["IOArray", "AddressOffset"]'
+
+    Example: find VALVE_CTL instances with AddressOffset=5 that share IOArray:
+        data_type = "VALVE_CTL"
+        match_members_json = '["IOArray"]'
+        filter_members_json = '{"AddressOffset": "5"}'
+
+    Args:
+        data_type: The data type to search for (e.g. 'VALVE_CTL', 'MyUDT').
+        match_members_json: JSON array of member names to group by.
+            Instances that share identical values for ALL of these members
+            are reported as a group. Values are read from decorated data
+            and optionally from rung text (for InOut params).
+            Example: '["IOArray", "AddressOffset"]'
+        filter_members_json: Optional JSON object of {member: value} pairs
+            to pre-filter tags before comparison. Only tags where ALL
+            specified members match the given values are included.
+            Example: '{"AddressOffset": "5"}'
+        scope: 'controller', 'program', or '' (empty = search all scopes).
+        program_name: Required when scope='program'.
+        include_rung_bindings: If true, also resolve InOut parameter values
+            from AOI call sites in rung text. Needed when match members
+            include InOut params (whose values appear in rung text, not
+            decorated data).
+
+    Returns:
+        JSON with:
+        - data_type: the data type searched
+        - match_members: list of members grouped by
+        - filter_applied: the filter criteria used (if any)
+        - total_instances: total tags found of this type
+        - groups_with_duplicates: number of groups with 2+ instances
+        - groups: list of {key, instance_count, instances: [{tag_name,
+            scope, program?, member_values: {member: value}}]}
+    """
+    prj = _require_project()
+    try:
+        match_members: list[str] = json.loads(match_members_json)
+        if not isinstance(match_members, list) or not match_members:
+            return json.dumps({"Error": "match_members_json must be a non-empty JSON array of member names."})
+
+        filter_members: dict[str, str] = {}
+        if filter_members_json:
+            filter_members = json.loads(filter_members_json)
+            if not isinstance(filter_members, dict):
+                return json.dumps({"Error": "filter_members_json must be a JSON object of {member: value} pairs."})
+
+        # Collect all tags of the specified data type
+        instances: list[dict] = []
+
+        if scope in ('', 'controller'):
+            for t in prj.list_controller_tags():
+                if t.get('data_type', '').lower() == data_type.lower():
+                    instances.append({
+                        'tag_name': t['name'],
+                        'scope': 'controller',
+                    })
+
+        if scope in ('', 'program'):
+            programs = [program_name] if program_name else prj.list_programs()
+            for p in programs:
+                for t in prj.list_program_tags(p):
+                    if t.get('data_type', '').lower() == data_type.lower():
+                        instances.append({
+                            'tag_name': t['name'],
+                            'scope': 'program',
+                            'program': p,
+                        })
+
+        # All member names we need to read (match + filter)
+        all_members = list(set(match_members) | set(filter_members.keys()))
+
+        # Determine which members are InOut params (need rung text)
+        inout_members: set[str] = set()
+        if include_rung_bindings:
+            try:
+                params = _aoi.get_aoi_parameters(prj, data_type)
+                for p in params:
+                    if (p.get('usage', '').lower() == 'inout'
+                            and p['name'] in all_members):
+                        inout_members.add(p['name'])
+            except Exception:
+                pass  # Not an AOI type, skip rung binding resolution
+
+        # Build param list for rung text resolution
+        vis_params: list[dict] = []
+        known_aois_set: set[str] = set()
+        if inout_members:
+            try:
+                all_params = _aoi.get_aoi_parameters(prj, data_type)
+                vis_params = [
+                    p for p in all_params
+                    if p.get('visible', True)
+                    and p['name'] not in ('EnableIn', 'EnableOut')
+                ]
+                known_aois_set = {data_type}
+            except Exception:
+                pass
+
+        # Read member values for each instance
+        enriched: list[dict] = []
+        for inst in instances:
+            tag_name = inst['tag_name']
+            sc = inst['scope']
+            pg = inst.get('program')
+            member_values: dict[str, object] = {}
+
+            # Read from decorated data
+            for member in all_members:
+                try:
+                    val = prj.get_tag_member_value(
+                        tag_name, member,
+                        scope=sc, program_name=pg,
+                    )
+                    member_values[member] = val
+                except Exception:
+                    member_values[member] = None
+
+            # Resolve InOut params from rung text
+            if inout_members:
+                unresolved = {m for m in inout_members if member_values.get(m) is None}
+                if unresolved:
+                    try:
+                        refs = prj.find_tag_references(tag_name)
+                        for ref in refs:
+                            text = ref.get('text', '')
+                            calls = _parse_aoi_calls_from_rung(text, known_aois_set)
+                            for call in calls:
+                                args = call['arguments']
+                                # args[0] is instance tag; visible params map to args[1:]
+                                param_args = args[1:] if len(args) > 1 else []
+                                for idx, p in enumerate(vis_params):
+                                    if (p['name'] in unresolved
+                                            and idx < len(param_args)):
+                                        member_values[p['name']] = param_args[idx]
+                                        unresolved.discard(p['name'])
+                                if not unresolved:
+                                    break
+                            if not unresolved:
+                                break
+                    except Exception:
+                        pass
+
+            # Apply filter: skip instances that don't match all filter criteria
+            if filter_members:
+                skip = False
+                for f_member, f_value in filter_members.items():
+                    inst_val = member_values.get(f_member)
+                    if str(inst_val) != str(f_value):
+                        skip = True
+                        break
+                if skip:
+                    continue
+
+            enriched.append({
+                **inst,
+                'member_values': member_values,
+            })
+
+        # Group by match_members values
+        keyed: dict[str, list] = {}
+        for inst in enriched:
+            key_parts = []
+            for m in match_members:
+                key_parts.append(str(inst['member_values'].get(m, '')))
+            key = '|'.join(key_parts)
+            keyed.setdefault(key, []).append(inst)
+
+        # Build groups (only those with 2+ instances are conflicts)
+        groups = []
+        for key, group in keyed.items():
+            if len(group) >= 2:
+                groups.append({
+                    'key': key,
+                    'instance_count': len(group),
+                    'instances': group,
+                })
+
+        return json.dumps({
+            'data_type': data_type,
+            'match_members': match_members,
+            'filter_applied': filter_members if filter_members else None,
+            'total_instances': len(enriched),
+            'groups_with_duplicates': len(groups),
+            'groups': groups,
+        }, indent=2)
+    except json.JSONDecodeError as e:
+        return f"Error: Invalid JSON - {e}"
+    except Exception as e:
+        return f"Error comparing tag instances: {e}"
+
+
+@mcp.tool()
 def detect_conflicts(
     check: str = "all",
-    aoi_name: str = "",
-    address_member: str = "",
-    array_member: str = "",
 ) -> str:
     """Detect potential conflicts and issues in the project.
 
-    Performs domain-specific checks that go beyond basic validation,
+    Performs structural checks that go beyond basic validation,
     looking for logical conflicts that could cause runtime issues.
+
+    For comparing structured tag member values (e.g. finding AOI instances
+    sharing the same address/array), use the compare_tag_instances tool instead.
 
     Args:
         check: Which checks to run:
             'all' -- run all checks below.
-            'aoi_address' -- find AOI instances that share the same I/O
-                array tag AND address offset (ASI bus collision risk).
             'tag_shadowing' -- find program-scope tags whose names match
                 controller-scope tags (legal but confusing).
             'unused_tags' -- find tags not referenced in any code.
             'scope_duplicates' -- find identical tag names across
                 different programs.
-        aoi_name: For 'aoi_address': filter to specific AOI type.
-                  If empty, checks all AOI types.
-        address_member: For 'aoi_address': the member name that holds the
-                        address offset (e.g. 'AddressOffset', 'ASIAddress',
-                        'Address'). If empty, auto-detects common patterns.
-        array_member: For 'aoi_address': the member name that holds the
-                      I/O array reference. If empty, auto-detects.
 
     Returns:
         JSON with check results and conflict details.
@@ -2059,177 +2259,12 @@ def detect_conflicts(
     prj = _require_project()
     try:
         checks = (
-            ['aoi_address', 'tag_shadowing', 'unused_tags', 'scope_duplicates']
+            ['tag_shadowing', 'unused_tags', 'scope_duplicates']
             if check == 'all'
             else [check]
         )
 
         result: dict = {}
-
-        # ---------------------------------------------------------------
-        # AOI Address Conflict Detection
-        # ---------------------------------------------------------------
-        if 'aoi_address' in checks:
-            aoi_conflicts = []
-
-            # Determine which AOI types to check
-            aoi_types_to_check: list[str] = []
-            if aoi_name:
-                aoi_types_to_check = [aoi_name]
-            else:
-                try:
-                    aoi_types_to_check = [a['name'] for a in prj.list_aois()]
-                except Exception:
-                    pass
-
-            for aoi_type in aoi_types_to_check:
-                # Get AOI parameters to find address/array members
-                try:
-                    params = _aoi.get_aoi_parameters(prj, aoi_type)
-                except Exception:
-                    continue
-
-                param_names = {p['name'].lower(): p['name'] for p in params}
-
-                # Auto-detect address member
-                addr_member = address_member
-                if not addr_member:
-                    for candidate in ['addressoffset', 'asiaddress', 'address',
-                                      'addr', 'offset', 'nodeaddress',
-                                      'startaddress', 'baseaddress']:
-                        if candidate in param_names:
-                            addr_member = param_names[candidate]
-                            break
-
-                # Auto-detect array/buffer member
-                arr_member = array_member
-                if not arr_member:
-                    for candidate in ['inputarray', 'outputarray', 'asiinput',
-                                      'asioutput', 'inputbuffer', 'outputbuffer',
-                                      'databuffer', 'ioarray', 'data',
-                                      'inarray', 'outarray']:
-                        if candidate in param_names:
-                            arr_member = param_names[candidate]
-                            break
-
-                if not addr_member and not arr_member:
-                    continue  # This AOI doesn't have address-like params
-
-                # Find all instances of this AOI type
-                instances: list[dict] = []
-
-                # Search controller tags
-                for t in prj.list_controller_tags():
-                    if t.get('data_type', '').lower() == aoi_type.lower():
-                        instances.append({
-                            'tag_name': t['name'],
-                            'scope': 'controller',
-                        })
-
-                # Search program tags
-                for p in prj.list_programs():
-                    for t in prj.list_program_tags(p):
-                        if t.get('data_type', '').lower() == aoi_type.lower():
-                            instances.append({
-                                'tag_name': t['name'],
-                                'scope': 'program',
-                                'program': p,
-                            })
-
-                if len(instances) < 2:
-                    continue  # Can't have conflicts with < 2 instances
-
-                # Read address/array values for each instance
-                keyed: dict[str, list] = {}  # (array_tag, offset) -> [instances]
-                for inst in instances:
-                    try:
-                        addr_val = None
-                        arr_val = None
-                        tag_name = inst['tag_name']
-                        sc = inst['scope']
-                        pg = inst.get('program')
-
-                        if addr_member:
-                            try:
-                                addr_val = prj.get_tag_member_value(
-                                    tag_name, addr_member,
-                                    scope=sc, program_name=pg,
-                                )
-                            except Exception:
-                                pass
-
-                        if arr_member:
-                            try:
-                                arr_val = prj.get_tag_member_value(
-                                    tag_name, arr_member,
-                                    scope=sc, program_name=pg,
-                                )
-                            except Exception:
-                                pass
-
-                        # Also check rung text for wired array tags
-                        # (InOut params appear in rung text, not decorated data)
-                        if arr_val is None or addr_val is None:
-                            refs = prj.find_tag_references(tag_name)
-                            known_aois_set = {aoi_type}
-                            for ref in refs:
-                                text = ref.get('text', '')
-                                calls = _parse_aoi_calls_from_rung(
-                                    text, known_aois_set,
-                                )
-                                for call in calls:
-                                    args = call['arguments']
-                                    try:
-                                        vis_params = _aoi.get_aoi_parameters(
-                                            prj, aoi_type,
-                                        )
-                                        vis_params = [
-                                            p for p in vis_params
-                                            if p.get('visible', True)
-                                            and p['name'] not in (
-                                                'EnableIn', 'EnableOut',
-                                            )
-                                        ]
-                                        for idx, p in enumerate(vis_params):
-                                            if (p['name'] == arr_member
-                                                    and idx < len(args)
-                                                    and arr_val is None):
-                                                arr_val = args[idx]
-                                            if (p['name'] == addr_member
-                                                    and idx < len(args)
-                                                    and addr_val is None):
-                                                try:
-                                                    addr_val = int(args[idx])
-                                                except (ValueError, TypeError):
-                                                    addr_val = args[idx]
-                                    except Exception:
-                                        pass
-
-                        key = f"{arr_val}@{addr_val}"
-                        keyed.setdefault(key, []).append({
-                            **inst,
-                            'address_value': addr_val,
-                            'array_value': arr_val,
-                        })
-                    except Exception:
-                        pass
-
-                # Report groups with 2+ instances
-                for key, group in keyed.items():
-                    if len(group) >= 2:
-                        aoi_conflicts.append({
-                            'aoi_type': aoi_type,
-                            'address_member': addr_member,
-                            'array_member': arr_member,
-                            'shared_key': key,
-                            'instance_count': len(group),
-                            'instances': group,
-                        })
-
-            result['aoi_address'] = {
-                'conflicts_found': len(aoi_conflicts),
-                'conflicts': aoi_conflicts,
-            }
 
         # ---------------------------------------------------------------
         # Tag Shadowing (program tag hides controller tag)
