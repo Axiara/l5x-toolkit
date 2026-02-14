@@ -1531,6 +1531,792 @@ def export_component(
         return f"Error exporting component: {e}"
 
 
+# ===================================================================
+# 9. Analysis & Cross-Reference Tools
+# ===================================================================
+
+def _parse_aoi_calls_from_rung(rung_text: str, known_aois: set) -> list:
+    """Parse a rung text and extract AOI instruction calls with argument mapping.
+
+    Returns a list of dicts:
+      {'aoi_name': str, 'arguments': [str, ...]}
+    where arguments[0] is the instance tag and subsequent entries are the
+    wired parameter values in declaration order.
+    """
+    tokens = _rungs.tokenize(rung_text)
+    calls = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if (tok.type == _rungs.TokenType.INSTRUCTION
+                and tok.value in known_aois):
+            # Collect arguments inside the parentheses
+            aoi_name = tok.value
+            args = []
+            # Next token should be OPEN_PAREN
+            j = i + 1
+            if j < len(tokens) and tokens[j].type == _rungs.TokenType.OPEN_PAREN:
+                depth = 1
+                j += 1
+                current_arg_parts = []
+                while j < len(tokens) and depth > 0:
+                    t = tokens[j]
+                    if t.type == _rungs.TokenType.OPEN_PAREN:
+                        depth += 1
+                        current_arg_parts.append(t.value)
+                    elif t.type == _rungs.TokenType.CLOSE_PAREN:
+                        depth -= 1
+                        if depth == 0:
+                            if current_arg_parts:
+                                args.append(''.join(current_arg_parts))
+                        else:
+                            current_arg_parts.append(t.value)
+                    elif t.type == _rungs.TokenType.COMMA and depth == 1:
+                        args.append(''.join(current_arg_parts))
+                        current_arg_parts = []
+                    else:
+                        current_arg_parts.append(t.value)
+                    j += 1
+            calls.append({'aoi_name': aoi_name, 'arguments': args})
+            i = j
+        else:
+            i += 1
+    return calls
+
+
+@mcp.tool()
+def get_scope_references(
+    program_name: str,
+    routine_name: str = "",
+    rung_range: str = "",
+    include_tag_info: bool = True,
+) -> str:
+    """Return all tags and AOI instances referenced within a code scope.
+
+    Answers the question: "What does this routine/rung range touch?"
+    Returns every unique tag with its metadata, which rungs use it,
+    and for AOI-bound tags, the parameter binding context.
+
+    Args:
+        program_name: The program to analyze.
+        routine_name: Specific routine (or empty to scan all routines
+                      in the program).
+        rung_range: Rung filter -- '' for all, '3-7' for range,
+                    '0,2,5' for specific rungs. Ignored for non-RLL.
+        include_tag_info: If true, resolve each tag's data_type, scope,
+                          description. If false, return names only.
+
+    Returns:
+        JSON with:
+        - tags: list of {name, data_type, scope, description, rungs: [int...]}
+        - aoi_calls: list of {aoi_name, rung, instance_tag, bindings: [{
+            parameter, usage, required, wired_tag}]}
+        - summary: {unique_tags, controller_tags, program_tags, aoi_calls}
+    """
+    prj = _require_project()
+    try:
+        # Determine which rungs to scan
+        rung_texts: list[tuple[int, str]] = []  # (rung_number, text)
+
+        if routine_name:
+            all_rungs = prj.get_all_rungs(program_name, routine_name)
+            for r in all_rungs:
+                rung_texts.append((r['number'], r['text']))
+        else:
+            # Scan all routines in the program
+            routines_info = prj.list_routines(program_name)
+            for rinfo in routines_info:
+                if rinfo.get('type', 'RLL') == 'RLL':
+                    for r in prj.get_all_rungs(program_name, rinfo['name']):
+                        rung_texts.append((r['number'], r['text']))
+
+        # Apply rung_range filter
+        if rung_range:
+            allowed: set[int] = set()
+            for part in rung_range.split(','):
+                part = part.strip()
+                if '-' in part:
+                    lo, hi = part.split('-', 1)
+                    allowed.update(range(int(lo.strip()), int(hi.strip()) + 1))
+                else:
+                    allowed.add(int(part))
+            rung_texts = [(n, t) for n, t in rung_texts if n in allowed]
+
+        # Extract tag references per rung
+        tag_rungs: dict[str, list[int]] = {}  # tag_name -> [rung_numbers]
+        for rung_num, text in rung_texts:
+            refs = _rungs.extract_tag_references(text)
+            for tag_name in refs:
+                tag_rungs.setdefault(tag_name, []).append(rung_num)
+
+        # Build known AOI names for call detection
+        known_aois: set[str] = set()
+        try:
+            aoi_list = prj.list_aois()
+            known_aois = {a['name'] for a in aoi_list}
+        except Exception:
+            pass
+
+        # Extract AOI calls with parameter bindings
+        aoi_calls_result = []
+        for rung_num, text in rung_texts:
+            calls = _parse_aoi_calls_from_rung(text, known_aois)
+            for call in calls:
+                aoi_name = call['aoi_name']
+                args = call['arguments']
+                bindings = []
+                try:
+                    params = _aoi.get_aoi_parameters(prj, aoi_name)
+                    # Filter to visible, non-system params
+                    visible_params = [
+                        p for p in params
+                        if p.get('visible', True)
+                        and p['name'] not in ('EnableIn', 'EnableOut')
+                    ]
+                    # args[0] is the instance tag; params map to args[1:]
+                    param_args = args[1:]
+                    for idx, param in enumerate(visible_params):
+                        wired = param_args[idx] if idx < len(param_args) else '?'
+                        bindings.append({
+                            'parameter': param['name'],
+                            'data_type': param['data_type'],
+                            'usage': param['usage'],
+                            'required': param['required'],
+                            'wired_tag': wired,
+                        })
+                except Exception:
+                    # AOI not found or params can't be read
+                    for idx, arg in enumerate(args):
+                        bindings.append({
+                            'parameter': f'arg{idx}',
+                            'wired_tag': arg,
+                        })
+
+                instance_tag = args[0] if args else '?'
+                aoi_calls_result.append({
+                    'aoi_name': aoi_name,
+                    'rung': rung_num,
+                    'instance_tag': instance_tag,
+                    'bindings': bindings,
+                })
+
+        # Resolve tag info if requested
+        tags_result = []
+        ctrl_count = 0
+        prog_count = 0
+        for tag_name, rungs_list in sorted(tag_rungs.items()):
+            entry: dict = {'name': tag_name, 'rungs': sorted(set(rungs_list))}
+            if include_tag_info:
+                try:
+                    info = _tags.find_tag(prj, tag_name)
+                    entry['data_type'] = info.get('data_type', '')
+                    entry['scope'] = info.get('scope', '')
+                    entry['program'] = info.get('program', '')
+                    entry['description'] = info.get('description', '')
+                    if info.get('scope') == 'controller':
+                        ctrl_count += 1
+                    else:
+                        prog_count += 1
+                except Exception:
+                    entry['data_type'] = '?'
+                    entry['scope'] = '?'
+            tags_result.append(entry)
+
+        result = {
+            'tags': tags_result,
+            'aoi_calls': aoi_calls_result,
+            'summary': {
+                'unique_tags': len(tags_result),
+                'controller_tags': ctrl_count,
+                'program_tags': prog_count,
+                'aoi_calls': len(aoi_calls_result),
+            },
+        }
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return f"Error getting scope references: {e}"
+
+
+@mcp.tool()
+def find_references(
+    names_json: str,
+    entity_type: str = "tag",
+) -> str:
+    """Find where one or more entities are referenced across the project.
+
+    Batch reverse-lookup: for a list of tag names, returns every rung/ST line
+    that references each one. Also supports searching for AOI invocations
+    and UDT usage.
+
+    Args:
+        names_json: JSON array of entity names, e.g. '["Tag1", "Tag2"]'.
+                    Also accepts a single string: '"Tag1"'.
+        entity_type: What to search for:
+            'tag' -- find rung/ST references to these tag names.
+            'aoi' -- find rungs that invoke these AOI instructions.
+            'udt' -- find tags whose DataType matches these UDT names.
+
+    Returns:
+        JSON object mapping each name to its references:
+        For tags/aois: {name: [{program, routine, rung/line, text}]}
+        For udts: {name: [{tag_name, scope, program?}]}
+    """
+    prj = _require_project()
+    try:
+        raw = json.loads(names_json)
+        names = [raw] if isinstance(raw, str) else raw
+    except json.JSONDecodeError as e:
+        return f"Error: Invalid JSON -- {e}"
+
+    try:
+        result: dict = {}
+
+        if entity_type == "tag":
+            for name in names:
+                refs = prj.find_tag_references(name)
+                result[name] = refs
+
+        elif entity_type == "aoi":
+            # For AOIs, we search for the instruction name in rung text
+            for name in names:
+                refs = prj.find_tag_references(name)
+                # Also do a more targeted search: AOI calls look like
+                # AOIName(instance,...) so we search for the pattern
+                import re
+                pattern = re.compile(
+                    rf'(?<![A-Za-z0-9_]){re.escape(name)}\(',
+                )
+                aoi_refs = []
+                for prog_elem in prj._all_program_elements():
+                    prog_name = prog_elem.get('Name', '')
+                    routines_el = prog_elem.find('Routines')
+                    if routines_el is None:
+                        continue
+                    for routine in routines_el.findall('Routine'):
+                        routine_name = routine.get('Name', '')
+                        rll = routine.find('RLLContent')
+                        if rll is not None:
+                            for rung in rll.findall('Rung'):
+                                text_el = rung.find('Text')
+                                if text_el is not None and text_el.text:
+                                    text = text_el.text.strip()
+                                    if pattern.search(text):
+                                        aoi_refs.append({
+                                            'program': prog_name,
+                                            'routine': routine_name,
+                                            'rung': int(rung.get('Number', '0')),
+                                            'text': text,
+                                        })
+                        st = routine.find('STContent')
+                        if st is not None:
+                            for line_el in st.findall('Line'):
+                                if line_el.text and pattern.search(line_el.text.strip()):
+                                    aoi_refs.append({
+                                        'program': prog_name,
+                                        'routine': routine_name,
+                                        'line': int(line_el.get('Number', '0')),
+                                        'text': line_el.text.strip(),
+                                    })
+                result[name] = aoi_refs
+
+        elif entity_type == "udt":
+            # For UDTs, find all tags whose DataType matches
+            for name in names:
+                matches = []
+                # Controller tags
+                for t in prj.list_controller_tags():
+                    if t.get('data_type', '').lower() == name.lower():
+                        matches.append({
+                            'tag_name': t['name'],
+                            'scope': 'controller',
+                        })
+                # Program tags
+                for p in prj.list_programs():
+                    for t in prj.list_program_tags(p):
+                        if t.get('data_type', '').lower() == name.lower():
+                            matches.append({
+                                'tag_name': t['name'],
+                                'scope': 'program',
+                                'program': p,
+                            })
+                result[name] = matches
+
+        else:
+            return (
+                f"Error: Unknown entity_type '{entity_type}'. "
+                f"Choose from: tag, aoi, udt."
+            )
+
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return f"Error finding references: {e}"
+
+
+@mcp.tool()
+def get_tag_values(
+    names_json: str,
+    scope: str = "controller",
+    program_name: str = "",
+    include_members: bool = False,
+    include_aoi_context: bool = False,
+    name_filter: str = "",
+) -> str:
+    """Get values and metadata for one or more tags in a single call.
+
+    Answers the question: "Show me everything about these tags" without
+    multiple round-trips. Supports glob patterns to match tag groups.
+
+    Args:
+        names_json: JSON array of tag names, e.g. '["Tag1", "Tag2"]'.
+                    Use '[]' (empty array) with name_filter to query
+                    by pattern instead.
+        scope: Default scope for lookups ('controller', 'program', or
+               '' to search all).
+        program_name: Required when scope is 'program'.
+        include_members: If true, expand structured types into full
+                         member trees with values (TIMER, UDT, etc.).
+        include_aoi_context: If true and a tag is wired as an AOI
+                             parameter in any rung, include which AOI,
+                             which parameter, usage (Input/Output/InOut),
+                             and whether it's required.
+        name_filter: Glob pattern to select tags (e.g. 'Conv1_*').
+                     Applied to the specified scope. Overrides names_json
+                     if names_json is empty.
+
+    Returns:
+        JSON array of tag objects, each with:
+        - name, data_type, scope, description, value, radix
+        - members: (if include_members) dict of member values
+        - aoi_context: (if include_aoi_context) list of {aoi_name,
+          parameter, usage, required, program, routine, rung}
+    """
+    prj = _require_project()
+    try:
+        raw = json.loads(names_json)
+        names = [raw] if isinstance(raw, str) else raw
+    except json.JSONDecodeError as e:
+        return f"Error: Invalid JSON -- {e}"
+
+    try:
+        # If names is empty but name_filter is provided, discover names
+        if not names and name_filter:
+            all_tags = []
+            if scope in ('controller', ''):
+                all_tags.extend(prj.list_controller_tags())
+            if scope in ('program', ''):
+                if program_name:
+                    all_tags.extend(prj.list_program_tags(program_name))
+                elif scope == '':
+                    for p in prj.list_programs():
+                        for t in prj.list_program_tags(p):
+                            t['_program'] = p
+                            all_tags.append(t)
+            names = [
+                t['name'] for t in all_tags
+                if fnmatch.fnmatch(t['name'], name_filter)
+            ]
+
+        # Build AOI call index if needed
+        aoi_tag_bindings: dict[str, list] = {}  # tag_name -> [{aoi info}]
+        if include_aoi_context:
+            known_aois: set[str] = set()
+            try:
+                known_aois = {a['name'] for a in prj.list_aois()}
+            except Exception:
+                pass
+
+            if known_aois:
+                # Pre-cache AOI parameter lists
+                aoi_params_cache: dict[str, list] = {}
+                for aoi_name in known_aois:
+                    try:
+                        params = _aoi.get_aoi_parameters(prj, aoi_name)
+                        aoi_params_cache[aoi_name] = [
+                            p for p in params
+                            if p.get('visible', True)
+                            and p['name'] not in ('EnableIn', 'EnableOut')
+                        ]
+                    except Exception:
+                        pass
+
+                # Scan all rungs for AOI calls
+                for prog_elem in prj._all_program_elements():
+                    pname = prog_elem.get('Name', '')
+                    routines_el = prog_elem.find('Routines')
+                    if routines_el is None:
+                        continue
+                    for routine in routines_el.findall('Routine'):
+                        rname = routine.get('Name', '')
+                        rll = routine.find('RLLContent')
+                        if rll is None:
+                            continue
+                        for rung in rll.findall('Rung'):
+                            text_el = rung.find('Text')
+                            if text_el is None or not text_el.text:
+                                continue
+                            rung_num = int(rung.get('Number', '0'))
+                            calls = _parse_aoi_calls_from_rung(
+                                text_el.text.strip(), known_aois,
+                            )
+                            for call in calls:
+                                aoi_name = call['aoi_name']
+                                args = call['arguments']
+                                params = aoi_params_cache.get(aoi_name, [])
+                                # args[0] is instance tag; params map to args[1:]
+                                param_args = args[1:]
+                                for idx, arg in enumerate(param_args):
+                                    base = _rungs._base_tag_name(arg)
+                                    if base == '?':
+                                        continue
+                                    param_info = params[idx] if idx < len(params) else None
+                                    binding = {
+                                        'aoi_name': aoi_name,
+                                        'parameter': param_info['name'] if param_info else f'arg{idx}',
+                                        'usage': param_info['usage'] if param_info else '?',
+                                        'required': param_info['required'] if param_info else False,
+                                        'program': pname,
+                                        'routine': rname,
+                                        'rung': rung_num,
+                                    }
+                                    aoi_tag_bindings.setdefault(base, []).append(binding)
+
+        # Build result for each tag
+        results = []
+        for tag_name in names:
+            entry: dict = {'name': tag_name}
+            try:
+                if scope == '':
+                    info = _tags.find_tag(prj, tag_name)
+                else:
+                    info = _tags.get_tag_info(
+                        prj, tag_name,
+                        scope=scope,
+                        program_name=program_name or None,
+                    )
+                entry['data_type'] = info.get('data_type', '')
+                entry['scope'] = info.get('scope', scope)
+                entry['program'] = info.get('program', '')
+                entry['description'] = info.get('description', '')
+                entry['radix'] = info.get('radix', '')
+                entry['tag_type'] = info.get('tag_type', 'Base')
+                entry['alias_for'] = info.get('alias_for')
+
+                # Value
+                val = info.get('value')
+                if include_members and isinstance(val, dict):
+                    entry['value'] = None
+                    entry['members'] = val
+                else:
+                    entry['value'] = val
+
+            except Exception as e:
+                entry['error'] = str(e)
+
+            # AOI context
+            if include_aoi_context and tag_name in aoi_tag_bindings:
+                entry['aoi_context'] = aoi_tag_bindings[tag_name]
+
+            results.append(entry)
+
+        return json.dumps(results, indent=2)
+    except Exception as e:
+        return f"Error getting tag values: {e}"
+
+
+@mcp.tool()
+def detect_conflicts(
+    check: str = "all",
+    aoi_name: str = "",
+    address_member: str = "",
+    array_member: str = "",
+) -> str:
+    """Detect potential conflicts and issues in the project.
+
+    Performs domain-specific checks that go beyond basic validation,
+    looking for logical conflicts that could cause runtime issues.
+
+    Args:
+        check: Which checks to run:
+            'all' -- run all checks below.
+            'aoi_address' -- find AOI instances that share the same I/O
+                array tag AND address offset (ASI bus collision risk).
+            'tag_shadowing' -- find program-scope tags whose names match
+                controller-scope tags (legal but confusing).
+            'unused_tags' -- find tags not referenced in any code.
+            'scope_duplicates' -- find identical tag names across
+                different programs.
+        aoi_name: For 'aoi_address': filter to specific AOI type.
+                  If empty, checks all AOI types.
+        address_member: For 'aoi_address': the member name that holds the
+                        address offset (e.g. 'AddressOffset', 'ASIAddress',
+                        'Address'). If empty, auto-detects common patterns.
+        array_member: For 'aoi_address': the member name that holds the
+                      I/O array reference. If empty, auto-detects.
+
+    Returns:
+        JSON with check results and conflict details.
+    """
+    prj = _require_project()
+    try:
+        checks = (
+            ['aoi_address', 'tag_shadowing', 'unused_tags', 'scope_duplicates']
+            if check == 'all'
+            else [check]
+        )
+
+        result: dict = {}
+
+        # ---------------------------------------------------------------
+        # AOI Address Conflict Detection
+        # ---------------------------------------------------------------
+        if 'aoi_address' in checks:
+            aoi_conflicts = []
+
+            # Determine which AOI types to check
+            aoi_types_to_check: list[str] = []
+            if aoi_name:
+                aoi_types_to_check = [aoi_name]
+            else:
+                try:
+                    aoi_types_to_check = [a['name'] for a in prj.list_aois()]
+                except Exception:
+                    pass
+
+            for aoi_type in aoi_types_to_check:
+                # Get AOI parameters to find address/array members
+                try:
+                    params = _aoi.get_aoi_parameters(prj, aoi_type)
+                except Exception:
+                    continue
+
+                param_names = {p['name'].lower(): p['name'] for p in params}
+
+                # Auto-detect address member
+                addr_member = address_member
+                if not addr_member:
+                    for candidate in ['addressoffset', 'asiaddress', 'address',
+                                      'addr', 'offset', 'nodeaddress',
+                                      'startaddress', 'baseaddress']:
+                        if candidate in param_names:
+                            addr_member = param_names[candidate]
+                            break
+
+                # Auto-detect array/buffer member
+                arr_member = array_member
+                if not arr_member:
+                    for candidate in ['inputarray', 'outputarray', 'asiinput',
+                                      'asioutput', 'inputbuffer', 'outputbuffer',
+                                      'databuffer', 'ioarray', 'data',
+                                      'inarray', 'outarray']:
+                        if candidate in param_names:
+                            arr_member = param_names[candidate]
+                            break
+
+                if not addr_member and not arr_member:
+                    continue  # This AOI doesn't have address-like params
+
+                # Find all instances of this AOI type
+                instances: list[dict] = []
+
+                # Search controller tags
+                for t in prj.list_controller_tags():
+                    if t.get('data_type', '').lower() == aoi_type.lower():
+                        instances.append({
+                            'tag_name': t['name'],
+                            'scope': 'controller',
+                        })
+
+                # Search program tags
+                for p in prj.list_programs():
+                    for t in prj.list_program_tags(p):
+                        if t.get('data_type', '').lower() == aoi_type.lower():
+                            instances.append({
+                                'tag_name': t['name'],
+                                'scope': 'program',
+                                'program': p,
+                            })
+
+                if len(instances) < 2:
+                    continue  # Can't have conflicts with < 2 instances
+
+                # Read address/array values for each instance
+                keyed: dict[str, list] = {}  # (array_tag, offset) -> [instances]
+                for inst in instances:
+                    try:
+                        addr_val = None
+                        arr_val = None
+                        tag_name = inst['tag_name']
+                        sc = inst['scope']
+                        pg = inst.get('program')
+
+                        if addr_member:
+                            try:
+                                addr_val = prj.get_tag_member_value(
+                                    tag_name, addr_member,
+                                    scope=sc, program_name=pg,
+                                )
+                            except Exception:
+                                pass
+
+                        if arr_member:
+                            try:
+                                arr_val = prj.get_tag_member_value(
+                                    tag_name, arr_member,
+                                    scope=sc, program_name=pg,
+                                )
+                            except Exception:
+                                pass
+
+                        # Also check rung text for wired array tags
+                        # (InOut params appear in rung text, not decorated data)
+                        if arr_val is None or addr_val is None:
+                            refs = prj.find_tag_references(tag_name)
+                            known_aois_set = {aoi_type}
+                            for ref in refs:
+                                text = ref.get('text', '')
+                                calls = _parse_aoi_calls_from_rung(
+                                    text, known_aois_set,
+                                )
+                                for call in calls:
+                                    args = call['arguments']
+                                    try:
+                                        vis_params = _aoi.get_aoi_parameters(
+                                            prj, aoi_type,
+                                        )
+                                        vis_params = [
+                                            p for p in vis_params
+                                            if p.get('visible', True)
+                                            and p['name'] not in (
+                                                'EnableIn', 'EnableOut',
+                                            )
+                                        ]
+                                        for idx, p in enumerate(vis_params):
+                                            if (p['name'] == arr_member
+                                                    and idx < len(args)
+                                                    and arr_val is None):
+                                                arr_val = args[idx]
+                                            if (p['name'] == addr_member
+                                                    and idx < len(args)
+                                                    and addr_val is None):
+                                                try:
+                                                    addr_val = int(args[idx])
+                                                except (ValueError, TypeError):
+                                                    addr_val = args[idx]
+                                    except Exception:
+                                        pass
+
+                        key = f"{arr_val}@{addr_val}"
+                        keyed.setdefault(key, []).append({
+                            **inst,
+                            'address_value': addr_val,
+                            'array_value': arr_val,
+                        })
+                    except Exception:
+                        pass
+
+                # Report groups with 2+ instances
+                for key, group in keyed.items():
+                    if len(group) >= 2:
+                        aoi_conflicts.append({
+                            'aoi_type': aoi_type,
+                            'address_member': addr_member,
+                            'array_member': arr_member,
+                            'shared_key': key,
+                            'instance_count': len(group),
+                            'instances': group,
+                        })
+
+            result['aoi_address'] = {
+                'conflicts_found': len(aoi_conflicts),
+                'conflicts': aoi_conflicts,
+            }
+
+        # ---------------------------------------------------------------
+        # Tag Shadowing (program tag hides controller tag)
+        # ---------------------------------------------------------------
+        if 'tag_shadowing' in checks:
+            shadows = []
+            ctrl_names = {
+                t['name'].lower(): t
+                for t in prj.list_controller_tags()
+            }
+
+            for p in prj.list_programs():
+                for t in prj.list_program_tags(p):
+                    if t['name'].lower() in ctrl_names:
+                        ctrl_tag = ctrl_names[t['name'].lower()]
+                        shadows.append({
+                            'tag_name': t['name'],
+                            'program': p,
+                            'program_data_type': t.get('data_type', ''),
+                            'controller_data_type': ctrl_tag.get('data_type', ''),
+                            'types_match': (
+                                t.get('data_type', '').lower()
+                                == ctrl_tag.get('data_type', '').lower()
+                            ),
+                        })
+
+            result['tag_shadowing'] = {
+                'shadows_found': len(shadows),
+                'shadows': shadows,
+            }
+
+        # ---------------------------------------------------------------
+        # Unused Tags
+        # ---------------------------------------------------------------
+        if 'unused_tags' in checks:
+            unused_ctrl = prj.find_unused_tags(scope='controller')
+            unused_prog: dict[str, list] = {}
+            for p in prj.list_programs():
+                unused = prj.find_unused_tags(scope='program', program_name=p)
+                if unused:
+                    unused_prog[p] = unused
+
+            result['unused_tags'] = {
+                'controller_unused': len(unused_ctrl),
+                'controller_tags': unused_ctrl,
+                'programs': {
+                    p: {'count': len(tags), 'tags': tags}
+                    for p, tags in unused_prog.items()
+                },
+            }
+
+        # ---------------------------------------------------------------
+        # Scope Duplicates (same tag name in multiple programs)
+        # ---------------------------------------------------------------
+        if 'scope_duplicates' in checks:
+            # Build map: lower(tag_name) -> [(program, data_type)]
+            name_map: dict[str, list] = {}
+            for p in prj.list_programs():
+                for t in prj.list_program_tags(p):
+                    key = t['name'].lower()
+                    name_map.setdefault(key, []).append({
+                        'program': p,
+                        'name': t['name'],
+                        'data_type': t.get('data_type', ''),
+                    })
+
+            dupes = []
+            for key, entries in name_map.items():
+                if len(entries) >= 2:
+                    dupes.append({
+                        'tag_name': entries[0]['name'],
+                        'occurrences': entries,
+                        'types_consistent': len(
+                            {e['data_type'].lower() for e in entries}
+                        ) == 1,
+                    })
+
+            result['scope_duplicates'] = {
+                'duplicates_found': len(dupes),
+                'duplicates': dupes,
+            }
+
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return f"Error detecting conflicts: {e}"
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

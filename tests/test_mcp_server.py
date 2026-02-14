@@ -105,9 +105,9 @@ def _load_test_project(tmp_path):
 # ===================================================================
 
 class TestToolCount:
-    def test_total_tools_is_26(self):
+    def test_total_tools_is_30(self):
         tools = list(mcp_server.mcp._tool_manager._tools.values())
-        assert len(tools) == 26
+        assert len(tools) == 30
 
 
 # ===================================================================
@@ -754,3 +754,540 @@ class TestFullWorkflow:
         assert result["succeeded"] == 2
         info_data = result["details"][1]["data"]
         assert info_data["Severity"] == 900
+
+
+# ===================================================================
+# Richer fixture for analysis tools
+# ===================================================================
+
+_RICH_L5X = """\
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<RSLogix5000Content SchemaRevision="1.0" SoftwareRevision="37.00"
+    TargetName="RichCtrl" TargetType="Controller" ContainsContext="false"
+    Owner="" ExportDate="Thu Jan 01 00:00:00 2099"
+    ExportOptions="">
+<Controller Use="Target" Name="RichCtrl" ProcessorType="1756-L85E"
+    MajorRev="37" MinorRev="11">
+<DataTypes>
+  <DataType Name="MyUDT" Family="NoFamily" Class="User">
+    <Members>
+      <Member Name="Speed" DataType="DINT" Dimension="0" Radix="Decimal"
+              ExternalAccess="Read/Write"/>
+      <Member Name="Active" DataType="BOOL" Dimension="0" Radix="Decimal"
+              ExternalAccess="Read/Write"/>
+    </Members>
+  </DataType>
+</DataTypes>
+<Modules/>
+<AddOnInstructionDefinitions>
+  <AddOnInstructionDefinition Name="VALVE_CTL" Revision="1.0" Class="Standard"
+      CreatedDate="2024-01-01T00:00:00.000Z"
+      EditedDate="2024-06-01T00:00:00.000Z">
+    <Parameters>
+      <Parameter Name="EnableIn" DataType="BOOL" Usage="Input"
+                 Required="false" Visible="false"/>
+      <Parameter Name="EnableOut" DataType="BOOL" Usage="Output"
+                 Required="false" Visible="false"/>
+      <Parameter Name="Command" DataType="DINT" Usage="Input"
+                 Required="true" Visible="true">
+        <Description><![CDATA[Valve command]]></Description>
+      </Parameter>
+      <Parameter Name="Feedback" DataType="DINT" Usage="Input"
+                 Required="false" Visible="true">
+        <Description><![CDATA[Valve feedback]]></Description>
+      </Parameter>
+      <Parameter Name="IOArray" DataType="DINT" Usage="InOut"
+                 Required="true" Visible="true" Dimensions="10">
+        <Description><![CDATA[I/O array ref]]></Description>
+      </Parameter>
+      <Parameter Name="AddressOffset" DataType="DINT" Usage="Input"
+                 Required="true" Visible="true">
+        <Description><![CDATA[ASI address offset]]></Description>
+      </Parameter>
+      <Parameter Name="Output" DataType="BOOL" Usage="Output"
+                 Required="false" Visible="true"/>
+    </Parameters>
+    <LocalTags/>
+    <Routines>
+      <Routine Name="Logic" Type="RLL">
+        <RLLContent>
+          <Rung Number="0" Type="N">
+            <Text><![CDATA[NOP();]]></Text>
+          </Rung>
+        </RLLContent>
+      </Routine>
+    </Routines>
+  </AddOnInstructionDefinition>
+</AddOnInstructionDefinitions>
+<Tags>
+  <Tag Name="GlobalRun" TagType="Base" DataType="BOOL" Radix="Decimal"
+       Class="Standard" ExternalAccess="Read/Write">
+    <Data Format="L5K">0</Data>
+    <Data Format="Decorated">
+      <DataValue DataType="BOOL" Radix="Decimal" Value="0"/>
+    </Data>
+  </Tag>
+  <Tag Name="GlobalSpeed" TagType="Base" DataType="DINT" Radix="Decimal"
+       Class="Standard" ExternalAccess="Read/Write">
+    <Description><![CDATA[Global speed setpoint]]></Description>
+    <Data Format="L5K">1750</Data>
+    <Data Format="Decorated">
+      <DataValue DataType="DINT" Radix="Decimal" Value="1750"/>
+    </Data>
+  </Tag>
+  <Tag Name="Unused_Ctrl" TagType="Base" DataType="DINT" Radix="Decimal"
+       Class="Standard" ExternalAccess="Read/Write">
+    <Data Format="L5K">0</Data>
+    <Data Format="Decorated">
+      <DataValue DataType="DINT" Radix="Decimal" Value="0"/>
+    </Data>
+  </Tag>
+  <Tag Name="ShadowTag" TagType="Base" DataType="DINT" Radix="Decimal"
+       Class="Standard" ExternalAccess="Read/Write">
+    <Data Format="L5K">0</Data>
+    <Data Format="Decorated">
+      <DataValue DataType="DINT" Radix="Decimal" Value="0"/>
+    </Data>
+  </Tag>
+  <Tag Name="V101" TagType="Base" DataType="VALVE_CTL" Radix="NullType"
+       Class="Standard" ExternalAccess="Read/Write">
+    <Data Format="L5K">[0,0,[0,0,0,0,0,0,0,0,0,0],0,0]</Data>
+    <Data Format="Decorated">
+      <Structure DataType="VALVE_CTL">
+        <DataValueMember Name="EnableIn" DataType="BOOL" Value="0"/>
+        <DataValueMember Name="EnableOut" DataType="BOOL" Value="0"/>
+        <DataValueMember Name="Command" DataType="DINT" Radix="Decimal" Value="0"/>
+        <DataValueMember Name="Feedback" DataType="DINT" Radix="Decimal" Value="0"/>
+        <DataValueMember Name="AddressOffset" DataType="DINT" Radix="Decimal" Value="5"/>
+        <DataValueMember Name="Output" DataType="BOOL" Value="0"/>
+      </Structure>
+    </Data>
+  </Tag>
+  <Tag Name="V102" TagType="Base" DataType="VALVE_CTL" Radix="NullType"
+       Class="Standard" ExternalAccess="Read/Write">
+    <Data Format="L5K">[0,0,[0,0,0,0,0,0,0,0,0,0],0,0]</Data>
+    <Data Format="Decorated">
+      <Structure DataType="VALVE_CTL">
+        <DataValueMember Name="EnableIn" DataType="BOOL" Value="0"/>
+        <DataValueMember Name="EnableOut" DataType="BOOL" Value="0"/>
+        <DataValueMember Name="Command" DataType="DINT" Radix="Decimal" Value="0"/>
+        <DataValueMember Name="Feedback" DataType="DINT" Radix="Decimal" Value="0"/>
+        <DataValueMember Name="AddressOffset" DataType="DINT" Radix="Decimal" Value="5"/>
+        <DataValueMember Name="Output" DataType="BOOL" Value="0"/>
+      </Structure>
+    </Data>
+  </Tag>
+  <Tag Name="IO_Data" TagType="Base" DataType="DINT" Dimensions="10"
+       Radix="Decimal" Class="Standard" ExternalAccess="Read/Write">
+    <Data Format="L5K">[0,0,0,0,0,0,0,0,0,0]</Data>
+    <Data Format="Decorated">
+      <Array DataType="DINT" Dimensions="10" Radix="Decimal">
+        <Element Index="[0]" Value="0"/>
+        <Element Index="[1]" Value="0"/>
+        <Element Index="[2]" Value="0"/>
+        <Element Index="[3]" Value="0"/>
+        <Element Index="[4]" Value="0"/>
+        <Element Index="[5]" Value="0"/>
+        <Element Index="[6]" Value="0"/>
+        <Element Index="[7]" Value="0"/>
+        <Element Index="[8]" Value="0"/>
+        <Element Index="[9]" Value="0"/>
+      </Array>
+    </Data>
+  </Tag>
+</Tags>
+<Programs>
+  <Program Name="ValveProgram" Type="Normal" Class="Standard"
+           MainRoutineName="MainRoutine">
+    <Tags>
+      <Tag Name="LocalCmd" TagType="Base" DataType="DINT" Radix="Decimal"
+           Class="Standard" ExternalAccess="Read/Write">
+        <Data Format="L5K">0</Data>
+        <Data Format="Decorated">
+          <DataValue DataType="DINT" Radix="Decimal" Value="0"/>
+        </Data>
+      </Tag>
+      <Tag Name="ShadowTag" TagType="Base" DataType="BOOL" Radix="Decimal"
+           Class="Standard" ExternalAccess="Read/Write">
+        <Data Format="L5K">0</Data>
+        <Data Format="Decorated">
+          <DataValue DataType="BOOL" Radix="Decimal" Value="0"/>
+        </Data>
+      </Tag>
+    </Tags>
+    <Routines>
+      <Routine Name="MainRoutine" Type="RLL">
+        <RLLContent>
+          <Rung Number="0" Type="N">
+            <Text><![CDATA[XIC(GlobalRun)VALVE_CTL(V101,LocalCmd,0,IO_Data,5);]]></Text>
+            <Comment><![CDATA[Valve 101 control]]></Comment>
+          </Rung>
+          <Rung Number="1" Type="N">
+            <Text><![CDATA[XIC(GlobalRun)VALVE_CTL(V102,LocalCmd,0,IO_Data,5);]]></Text>
+            <Comment><![CDATA[Valve 102 control - same array and offset!]]></Comment>
+          </Rung>
+          <Rung Number="2" Type="N">
+            <Text><![CDATA[MOV(GlobalSpeed,LocalCmd);]]></Text>
+            <Comment><![CDATA[Transfer speed]]></Comment>
+          </Rung>
+        </RLLContent>
+      </Routine>
+    </Routines>
+  </Program>
+  <Program Name="AuxProgram" Type="Normal" Class="Standard"
+           MainRoutineName="MainRoutine">
+    <Tags>
+      <Tag Name="LocalCmd" TagType="Base" DataType="DINT" Radix="Decimal"
+           Class="Standard" ExternalAccess="Read/Write">
+        <Data Format="L5K">0</Data>
+        <Data Format="Decorated">
+          <DataValue DataType="DINT" Radix="Decimal" Value="0"/>
+        </Data>
+      </Tag>
+    </Tags>
+    <Routines>
+      <Routine Name="MainRoutine" Type="RLL">
+        <RLLContent>
+          <Rung Number="0" Type="N">
+            <Text><![CDATA[NOP();]]></Text>
+          </Rung>
+        </RLLContent>
+      </Routine>
+    </Routines>
+  </Program>
+</Programs>
+<Tasks>
+  <Task Name="MainTask" Type="CONTINUOUS" Priority="10" Rate="10">
+    <ScheduledPrograms>
+      <ScheduledProgram Name="ValveProgram"/>
+      <ScheduledProgram Name="AuxProgram"/>
+    </ScheduledPrograms>
+  </Task>
+</Tasks>
+</Controller>
+</RSLogix5000Content>
+"""
+
+
+@pytest.fixture()
+def rich_project(tmp_path):
+    """Load a richer L5X project with AOIs, UDTs, and multiple programs."""
+    f = tmp_path / "rich.L5X"
+    f.write_text(_RICH_L5X, encoding="utf-8")
+    result = mcp_server.load_project(str(f))
+    assert "Error" not in result, result
+    yield
+    # autouse fixture will clean up global state
+
+
+# ===================================================================
+# 14. get_scope_references
+# ===================================================================
+
+class TestGetScopeReferences:
+    def test_all_rungs_in_routine(self, rich_project):
+        raw = mcp_server.get_scope_references(
+            program_name="ValveProgram",
+            routine_name="MainRoutine",
+        )
+        data = json.loads(raw)
+        assert "tags" in data
+        assert "aoi_calls" in data
+        assert "summary" in data
+
+        tag_names = {t["name"] for t in data["tags"]}
+        assert "GlobalRun" in tag_names
+        assert "GlobalSpeed" in tag_names
+        assert "LocalCmd" in tag_names
+        assert "V101" in tag_names
+        assert "IO_Data" in tag_names
+
+    def test_rung_range_filter(self, rich_project):
+        raw = mcp_server.get_scope_references(
+            program_name="ValveProgram",
+            routine_name="MainRoutine",
+            rung_range="0",
+        )
+        data = json.loads(raw)
+        tag_names = {t["name"] for t in data["tags"]}
+        assert "GlobalRun" in tag_names
+        assert "V101" in tag_names
+        # GlobalSpeed is only in rung 2, should NOT be here
+        assert "GlobalSpeed" not in tag_names
+
+    def test_rung_range_with_dash(self, rich_project):
+        raw = mcp_server.get_scope_references(
+            program_name="ValveProgram",
+            routine_name="MainRoutine",
+            rung_range="0-1",
+        )
+        data = json.loads(raw)
+        tag_names = {t["name"] for t in data["tags"]}
+        assert "V101" in tag_names
+        assert "V102" in tag_names
+        # GlobalSpeed is in rung 2, excluded
+        assert "GlobalSpeed" not in tag_names
+
+    def test_include_tag_info(self, rich_project):
+        raw = mcp_server.get_scope_references(
+            program_name="ValveProgram",
+            routine_name="MainRoutine",
+            include_tag_info=True,
+        )
+        data = json.loads(raw)
+        speed_tag = next(t for t in data["tags"] if t["name"] == "GlobalSpeed")
+        assert speed_tag["data_type"] == "DINT"
+        assert speed_tag["scope"] == "controller"
+
+    def test_aoi_calls_detected(self, rich_project):
+        raw = mcp_server.get_scope_references(
+            program_name="ValveProgram",
+            routine_name="MainRoutine",
+        )
+        data = json.loads(raw)
+        assert data["summary"]["aoi_calls"] >= 2
+        # Check AOI call details
+        aoi_call = data["aoi_calls"][0]
+        assert aoi_call["aoi_name"] == "VALVE_CTL"
+        assert aoi_call["instance_tag"] == "V101"
+        # Check parameter bindings
+        bindings = aoi_call["bindings"]
+        binding_names = [b["parameter"] for b in bindings]
+        assert "Command" in binding_names
+        assert "IOArray" in binding_names
+        assert "AddressOffset" in binding_names
+
+    def test_aoi_binding_usage(self, rich_project):
+        raw = mcp_server.get_scope_references(
+            program_name="ValveProgram",
+            routine_name="MainRoutine",
+            rung_range="0",
+        )
+        data = json.loads(raw)
+        call = data["aoi_calls"][0]
+        # Find the IOArray binding
+        io_binding = next(
+            b for b in call["bindings"] if b["parameter"] == "IOArray"
+        )
+        assert io_binding["usage"] == "InOut"
+        assert io_binding["required"] is True
+        assert io_binding["wired_tag"] == "IO_Data"
+
+    def test_names_only_mode(self, rich_project):
+        raw = mcp_server.get_scope_references(
+            program_name="ValveProgram",
+            routine_name="MainRoutine",
+            include_tag_info=False,
+        )
+        data = json.loads(raw)
+        # Tags should have name and rungs but no data_type
+        for t in data["tags"]:
+            assert "name" in t
+            assert "rungs" in t
+            assert "data_type" not in t
+
+    def test_scan_all_routines_in_program(self, rich_project):
+        raw = mcp_server.get_scope_references(
+            program_name="ValveProgram",
+        )
+        data = json.loads(raw)
+        assert data["summary"]["unique_tags"] > 0
+
+
+# ===================================================================
+# 15. find_references
+# ===================================================================
+
+class TestFindReferences:
+    def test_single_tag(self, rich_project):
+        raw = mcp_server.find_references('"GlobalRun"', entity_type="tag")
+        data = json.loads(raw)
+        assert "GlobalRun" in data
+        assert len(data["GlobalRun"]) >= 2  # used in rung 0 and 1
+
+    def test_batch_tags(self, rich_project):
+        raw = mcp_server.find_references(
+            '["GlobalRun", "GlobalSpeed"]', entity_type="tag",
+        )
+        data = json.loads(raw)
+        assert "GlobalRun" in data
+        assert "GlobalSpeed" in data
+        assert len(data["GlobalRun"]) >= 2
+        assert len(data["GlobalSpeed"]) >= 1
+
+    def test_aoi_references(self, rich_project):
+        raw = mcp_server.find_references(
+            '["VALVE_CTL"]', entity_type="aoi",
+        )
+        data = json.loads(raw)
+        assert "VALVE_CTL" in data
+        assert len(data["VALVE_CTL"]) >= 2
+
+    def test_udt_references(self, rich_project):
+        raw = mcp_server.find_references(
+            '["VALVE_CTL"]', entity_type="udt",
+        )
+        data = json.loads(raw)
+        assert "VALVE_CTL" in data
+        tag_names = [m["tag_name"] for m in data["VALVE_CTL"]]
+        assert "V101" in tag_names
+        assert "V102" in tag_names
+
+    def test_unknown_entity_type(self, rich_project):
+        raw = mcp_server.find_references('"X"', entity_type="bogus")
+        assert "Error" in raw
+
+    def test_invalid_json(self, rich_project):
+        raw = mcp_server.find_references("not json")
+        assert "Error" in raw
+
+    def test_tag_not_found(self, rich_project):
+        raw = mcp_server.find_references('"NonExistent"', entity_type="tag")
+        data = json.loads(raw)
+        assert data["NonExistent"] == []
+
+
+# ===================================================================
+# 16. get_tag_values
+# ===================================================================
+
+class TestGetTagValues:
+    def test_single_tag_value(self, rich_project):
+        raw = mcp_server.get_tag_values('"GlobalSpeed"')
+        data = json.loads(raw)
+        assert len(data) == 1
+        assert data[0]["name"] == "GlobalSpeed"
+        assert data[0]["value"] == 1750
+        assert data[0]["data_type"] == "DINT"
+
+    def test_multiple_tags(self, rich_project):
+        raw = mcp_server.get_tag_values('["GlobalRun", "GlobalSpeed"]')
+        data = json.loads(raw)
+        assert len(data) == 2
+        names = {t["name"] for t in data}
+        assert names == {"GlobalRun", "GlobalSpeed"}
+
+    def test_name_filter_glob(self, rich_project):
+        raw = mcp_server.get_tag_values(
+            '[]', name_filter="Global*",
+        )
+        data = json.loads(raw)
+        assert len(data) >= 2
+        for t in data:
+            assert t["name"].startswith("Global")
+
+    def test_include_members_structured(self, rich_project):
+        raw = mcp_server.get_tag_values(
+            '"V101"', include_members=True,
+        )
+        data = json.loads(raw)
+        assert len(data) == 1
+        assert "members" in data[0]
+        assert isinstance(data[0]["members"], dict)
+
+    def test_include_aoi_context(self, rich_project):
+        raw = mcp_server.get_tag_values(
+            '["IO_Data", "LocalCmd"]',
+            scope="",
+            include_aoi_context=True,
+        )
+        data = json.loads(raw)
+        # IO_Data is wired as IOArray parameter to VALVE_CTL
+        io_tag = next(t for t in data if t["name"] == "IO_Data")
+        assert "aoi_context" in io_tag
+        assert len(io_tag["aoi_context"]) >= 1
+        ctx = io_tag["aoi_context"][0]
+        assert ctx["aoi_name"] == "VALVE_CTL"
+        assert ctx["parameter"] == "IOArray"
+        assert ctx["usage"] == "InOut"
+
+    def test_program_scope(self, rich_project):
+        raw = mcp_server.get_tag_values(
+            '"LocalCmd"', scope="program", program_name="ValveProgram",
+        )
+        data = json.loads(raw)
+        assert len(data) == 1
+        assert data[0]["name"] == "LocalCmd"
+
+    def test_search_all_scopes(self, rich_project):
+        raw = mcp_server.get_tag_values(
+            '"GlobalRun"', scope="",
+        )
+        data = json.loads(raw)
+        assert data[0]["scope"] == "controller"
+
+    def test_nonexistent_tag(self, rich_project):
+        raw = mcp_server.get_tag_values('"NoSuchTag"')
+        data = json.loads(raw)
+        assert "error" in data[0]
+
+    def test_invalid_json(self, rich_project):
+        raw = mcp_server.get_tag_values("bad")
+        assert "Error" in raw
+
+
+# ===================================================================
+# 17. detect_conflicts
+# ===================================================================
+
+class TestDetectConflicts:
+    def test_tag_shadowing(self, rich_project):
+        raw = mcp_server.detect_conflicts(check="tag_shadowing")
+        data = json.loads(raw)
+        shadows = data["tag_shadowing"]["shadows"]
+        assert data["tag_shadowing"]["shadows_found"] >= 1
+        shadow_names = [s["tag_name"] for s in shadows]
+        assert "ShadowTag" in shadow_names
+        # Check the detail
+        shadow = next(s for s in shadows if s["tag_name"] == "ShadowTag")
+        assert shadow["program"] == "ValveProgram"
+        assert shadow["controller_data_type"] == "DINT"
+        assert shadow["program_data_type"] == "BOOL"
+        assert shadow["types_match"] is False
+
+    def test_unused_tags(self, rich_project):
+        raw = mcp_server.detect_conflicts(check="unused_tags")
+        data = json.loads(raw)
+        unused = data["unused_tags"]
+        assert "Unused_Ctrl" in unused["controller_tags"]
+
+    def test_scope_duplicates(self, rich_project):
+        raw = mcp_server.detect_conflicts(check="scope_duplicates")
+        data = json.loads(raw)
+        dupes = data["scope_duplicates"]["duplicates"]
+        # LocalCmd exists in both ValveProgram and AuxProgram
+        assert data["scope_duplicates"]["duplicates_found"] >= 1
+        dupe_names = [d["tag_name"] for d in dupes]
+        assert "LocalCmd" in dupe_names
+        # Check consistency flag
+        local_dupe = next(d for d in dupes if d["tag_name"] == "LocalCmd")
+        assert local_dupe["types_consistent"] is True
+
+    def test_aoi_address_conflict(self, rich_project):
+        raw = mcp_server.detect_conflicts(
+            check="aoi_address", aoi_name="VALVE_CTL",
+        )
+        data = json.loads(raw)
+        conflicts = data["aoi_address"]["conflicts"]
+        # V101 and V102 both use IO_Data with AddressOffset=5
+        assert data["aoi_address"]["conflicts_found"] >= 1
+        conflict = conflicts[0]
+        assert conflict["aoi_type"] == "VALVE_CTL"
+        assert conflict["instance_count"] >= 2
+        instance_names = [i["tag_name"] for i in conflict["instances"]]
+        assert "V101" in instance_names
+        assert "V102" in instance_names
+
+    def test_all_checks(self, rich_project):
+        raw = mcp_server.detect_conflicts(check="all")
+        data = json.loads(raw)
+        assert "aoi_address" in data
+        assert "tag_shadowing" in data
+        assert "unused_tags" in data
+        assert "scope_duplicates" in data
+
+    def test_unknown_check(self, rich_project):
+        raw = mcp_server.detect_conflicts(check="bogus")
+        # Should return empty result (no matching check name)
+        data = json.loads(raw)
+        assert isinstance(data, dict)
