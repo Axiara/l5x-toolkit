@@ -335,12 +335,39 @@ class ProgramAccessor:
         return None
 
     def get_all_rungs(
-        self, program_name: str, routine_name: str
-    ) -> list[dict]:
-        """Return all rungs in a routine as dicts."""
-        rungs = self._get_rung_elements(program_name, routine_name)
+        self,
+        program_name: str,
+        routine_name: str,
+        start: int = 0,
+        count: int = 0,
+    ) -> dict:
+        """Return rungs in a routine as a paginated result dict.
+
+        Args:
+            program_name: Name of the program.
+            routine_name: Name of the routine.
+            start: Zero-based index of the first rung to return.
+            count: Maximum number of rungs to return. 0 means all.
+
+        Returns:
+            Dict with ``total_rungs``, ``start``, ``count``, and ``rungs``
+            list.
+        """
+        all_rungs = self._get_rung_elements(program_name, routine_name)
+        total = len(all_rungs)
+
+        if start < 0:
+            start = 0
+        if start > total:
+            start = total
+
+        if count > 0:
+            selected = all_rungs[start : start + count]
+        else:
+            selected = all_rungs[start:]
+
         result = []
-        for rung in rungs:
+        for rung in selected:
             text_el = rung.find("Text")
             text = ""
             if text_el is not None and text_el.text:
@@ -357,7 +384,13 @@ class ProgramAccessor:
                 "text": text,
                 "comment": comment,
             })
-        return result
+
+        return {
+            "total_rungs": total,
+            "start": start,
+            "count": len(result),
+            "rungs": result,
+        }
 
     # -- internal helpers -----------------------------------------------
 

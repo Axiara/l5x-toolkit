@@ -458,6 +458,176 @@ class TestManageRungs:
         raw = mcp_server.manage_rungs("MainProgram", "MainRoutine", "{bad")
         assert "Error" in raw
 
+    def test_auto_adjust_delete_then_modify(self):
+        """Deleting an earlier rung should not require the caller to
+        manually shift later rung_number values."""
+        # Start with 1 existing rung (index 0).  Add two more so we have 3.
+        mcp_server.manage_rungs(
+            "MainProgram", "MainRoutine",
+            json.dumps([
+                {"action": "add", "text": "XIC(A)OTE(B);", "comment": "R1"},
+                {"action": "add", "text": "XIC(C)OTE(D);", "comment": "R2"},
+            ]),
+        )
+        # Routine now: [0: original, 1: R1, 2: R2]
+        # Delete rung 0, then modify what was rung 2 — using the
+        # *original* index (2), not the shifted one (1).
+        raw = mcp_server.manage_rungs(
+            "MainProgram", "MainRoutine",
+            json.dumps([
+                {"action": "delete", "rung_number": 0},
+                {"action": "modify", "rung_number": 2,
+                 "comment": "Modified R2"},
+            ]),
+        )
+        data = json.loads(raw)
+        assert data["succeeded"] == 2
+        assert data["failed"] == 0
+        # Verify the comment landed on the right rung
+        result = json.loads(
+            mcp_server.get_all_rungs("MainProgram", "MainRoutine", count=0)
+        )
+        # After deleting original 0, we have [R1, R2].
+        assert result["total_rungs"] == 2
+        assert result["rungs"][1]["comment"] == "Modified R2"
+
+    def test_auto_adjust_insert_then_modify(self):
+        """Inserting at a position should auto-adjust later rung refs."""
+        # Start with 1 existing rung (index 0).
+        # Insert at position 0 (before it), then modify original rung 0
+        # using its original index (0) — the server should map it to
+        # actual index 1 after the insertion.
+        raw = mcp_server.manage_rungs(
+            "MainProgram", "MainRoutine",
+            json.dumps([
+                {"action": "add", "text": "NOP();", "position": 0},
+                {"action": "modify", "rung_number": 0,
+                 "comment": "Modified original"},
+            ]),
+        )
+        data = json.loads(raw)
+        assert data["succeeded"] == 2
+        result = json.loads(
+            mcp_server.get_all_rungs("MainProgram", "MainRoutine", count=0)
+        )
+        # Rung 0 is the newly inserted NOP, rung 1 is the original
+        assert result["rungs"][1]["comment"] == "Modified original"
+
+    def test_auto_adjust_duplicate_then_modify(self):
+        """Duplicating a rung should auto-adjust later rung refs."""
+        # Start with 1 existing rung.  Add one more so we have 2.
+        mcp_server.manage_rungs(
+            "MainProgram", "MainRoutine",
+            json.dumps([{"action": "add", "text": "XIC(X)OTE(Y);"}]),
+        )
+        # Routine: [0: original, 1: XIC(X)OTE(Y)]
+        # Duplicate rung 0, then modify rung 1 using original index.
+        # The duplicate inserts after 0, so original rung 1 shifts to 2.
+        raw = mcp_server.manage_rungs(
+            "MainProgram", "MainRoutine",
+            json.dumps([
+                {"action": "duplicate", "rung_number": 0,
+                 "substitutions": {"MyBOOL": "NewTag"}},
+                {"action": "modify", "rung_number": 1,
+                 "comment": "Still rung 1"},
+            ]),
+        )
+        data = json.loads(raw)
+        assert data["succeeded"] == 2
+        result = json.loads(
+            mcp_server.get_all_rungs("MainProgram", "MainRoutine", count=0)
+        )
+        # [0: original, 1: duplicate, 2: XIC(X)OTE(Y)]
+        assert result["total_rungs"] == 3
+        assert result["rungs"][2]["comment"] == "Still rung 1"
+
+    def test_auto_adjust_multiple_deletes(self):
+        """Multiple deletes using original indices should all resolve."""
+        # Add 3 more rungs so we have 4 total (0..3)
+        mcp_server.manage_rungs(
+            "MainProgram", "MainRoutine",
+            json.dumps([
+                {"action": "add", "text": "NOP();", "comment": "A"},
+                {"action": "add", "text": "NOP();", "comment": "B"},
+                {"action": "add", "text": "NOP();", "comment": "C"},
+            ]),
+        )
+        # Delete original rungs 1 and 3 in one batch
+        raw = mcp_server.manage_rungs(
+            "MainProgram", "MainRoutine",
+            json.dumps([
+                {"action": "delete", "rung_number": 1},
+                {"action": "delete", "rung_number": 3},
+            ]),
+        )
+        data = json.loads(raw)
+        assert data["succeeded"] == 2
+        result = json.loads(
+            mcp_server.get_all_rungs("MainProgram", "MainRoutine", count=0)
+        )
+        # Started with 4 rungs, deleted 2 → 2 remain
+        assert result["total_rungs"] == 2
+
+
+class TestGetAllRungsPagination:
+    """Tests for the paginated get_all_rungs endpoint."""
+
+    def test_default_returns_paginated_dict(self):
+        raw = mcp_server.get_all_rungs("MainProgram", "MainRoutine")
+        data = json.loads(raw)
+        assert "total_rungs" in data
+        assert "start" in data
+        assert "count" in data
+        assert "rungs" in data
+        assert data["total_rungs"] == 1
+        assert data["count"] == 1
+
+    def test_count_zero_returns_all(self):
+        # Add extra rungs
+        mcp_server.manage_rungs(
+            "MainProgram", "MainRoutine",
+            json.dumps([
+                {"action": "add", "text": "NOP();"},
+                {"action": "add", "text": "NOP();"},
+            ]),
+        )
+        raw = mcp_server.get_all_rungs("MainProgram", "MainRoutine", count=0)
+        data = json.loads(raw)
+        assert data["total_rungs"] == 3
+        assert data["count"] == 3
+        assert len(data["rungs"]) == 3
+
+    def test_pagination_window(self):
+        # Add extra rungs so we have 4 total
+        mcp_server.manage_rungs(
+            "MainProgram", "MainRoutine",
+            json.dumps([
+                {"action": "add", "text": "NOP();", "comment": "R1"},
+                {"action": "add", "text": "NOP();", "comment": "R2"},
+                {"action": "add", "text": "NOP();", "comment": "R3"},
+            ]),
+        )
+        # Fetch only 2 starting at index 1
+        raw = mcp_server.get_all_rungs(
+            "MainProgram", "MainRoutine", start=1, count=2,
+        )
+        data = json.loads(raw)
+        assert data["total_rungs"] == 4
+        assert data["start"] == 1
+        assert data["count"] == 2
+        assert len(data["rungs"]) == 2
+        assert data["rungs"][0]["comment"] == "R1"
+        assert data["rungs"][1]["comment"] == "R2"
+
+    def test_start_beyond_range(self):
+        raw = mcp_server.get_all_rungs(
+            "MainProgram", "MainRoutine", start=999, count=10,
+        )
+        data = json.loads(raw)
+        assert data["total_rungs"] == 1
+        assert data["count"] == 0
+        assert data["rungs"] == []
+
 
 # ===================================================================
 # 7. analyze_rung_text
@@ -722,10 +892,11 @@ class TestFullWorkflow:
         assert result["succeeded"] == 2
 
         # 5. Verify the rungs are there
-        rungs = json.loads(
-            mcp_server.get_all_rungs("MainProgram", "MainRoutine")
+        result = json.loads(
+            mcp_server.get_all_rungs("MainProgram", "MainRoutine", count=0)
         )
-        assert len(rungs) == 3  # 1 original + 2 new
+        assert result["total_rungs"] == 3  # 1 original + 2 new
+        assert len(result["rungs"]) == 3
 
         # 6. Verify tag info
         info = json.loads(

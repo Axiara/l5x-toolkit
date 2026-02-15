@@ -484,7 +484,8 @@ def get_entity_info(
         elif entity == "rung":
             if not program_name or not routine_name:
                 return "Error: program_name and routine_name are required for entity='rung'."
-            all_rungs = prj.get_all_rungs(program_name, routine_name)
+            result = prj.get_all_rungs(program_name, routine_name, count=0)
+            all_rungs = result["rungs"]
             try:
                 rung_num = int(name)
             except ValueError:
@@ -503,15 +504,26 @@ def get_entity_info(
 
 
 @mcp.tool()
-def get_all_rungs(program_name: str, routine_name: str) -> str:
-    """Get all rungs in an RLL routine with their text and comments.
+def get_all_rungs(
+    program_name: str,
+    routine_name: str,
+    start: int = 0,
+    count: int = 50,
+) -> str:
+    """Get rungs in an RLL routine with their text and comments.
+
+    Returns a paginated result. Use ``start`` and ``count`` to page
+    through large routines without flooding the context window.
 
     Args:
         program_name: Name of the program.
         routine_name: Name of the routine.
+        start: Zero-based index of the first rung to return (default 0).
+        count: Maximum rungs to return (default 50, 0 = all).
     """
     prj = _require_project()
-    return json.dumps(prj.get_all_rungs(program_name, routine_name))
+    return json.dumps(prj.get_all_rungs(program_name, routine_name,
+                                        start=start, count=count))
 
 
 @mcp.tool()
@@ -829,9 +841,11 @@ def manage_rungs(
     Replaces the former add_rung, delete_rung, modify_rung_text,
     set_rung_comment, and duplicate_rung_with_substitution tools.
 
-    Operations are processed in order. Rung numbers in later operations
-    should account for insertions/deletions made by earlier operations
-    in the same batch.
+    All ``rung_number`` and ``position`` values should refer to the
+    rung indices **as they were before any operations in this batch**.
+    The server automatically adjusts indices to account for
+    insertions and deletions made by earlier operations in the same
+    batch, so the caller never needs to track shifting indices.
 
     Args:
         program_name: Program containing the routine.
@@ -856,51 +870,81 @@ def manage_rungs(
     except json.JSONDecodeError as e:
         return f"Error: Invalid JSON -- {e}"
 
+    # Track index adjustments so the caller can use original indices
+    # throughout the batch.  Each entry is (threshold, delta) meaning
+    # "original indices >= threshold shift by delta".
+    _adjustments: list[tuple[int, int]] = []
+
+    def _to_actual(orig: int) -> int:
+        """Map a caller-specified (original) rung index to the current
+        actual index after prior mutations in this batch."""
+        actual = orig
+        for threshold, delta in _adjustments:
+            if orig >= threshold:
+                actual += delta
+        return actual
+
     results = []
     for i, op in enumerate(ops):
         action = op.get("action", "")
         try:
             if action == "add":
-                pos = op.get("position")
-                pos = pos if pos is not None and pos >= 0 else None
+                orig_pos = op.get("position")
+                if orig_pos is not None and orig_pos >= 0:
+                    actual_pos = _to_actual(orig_pos)
+                    _adjustments.append((orig_pos, 1))
+                else:
+                    actual_pos = None
+                    # Append — no original indices shift.
                 _programs.add_rung(
                     prj, program_name, routine_name,
                     op["text"],
                     comment=op.get("comment") or None,
-                    position=pos,
+                    position=actual_pos,
                 )
                 results.append({"index": i, "status": "ok", "action": "add",
                                 "text": op["text"][:60]})
 
             elif action == "delete":
+                orig_rn = op["rung_number"]
+                actual_rn = _to_actual(orig_rn)
                 _programs.delete_rung(
-                    prj, program_name, routine_name, op["rung_number"],
+                    prj, program_name, routine_name, actual_rn,
                 )
+                # Original indices above the deleted one shift down.
+                _adjustments.append((orig_rn + 1, -1))
                 results.append({"index": i, "status": "ok", "action": "delete",
-                                "rung_number": op["rung_number"]})
+                                "rung_number": orig_rn})
 
             elif action == "modify":
-                rn = op["rung_number"]
+                orig_rn = op["rung_number"]
+                actual_rn = _to_actual(orig_rn)
                 if "text" in op:
                     _programs.modify_rung_text(
-                        prj, program_name, routine_name, rn, op["text"],
+                        prj, program_name, routine_name, actual_rn, op["text"],
                     )
                 if "comment" in op:
                     _programs.set_rung_comment(
-                        prj, program_name, routine_name, rn, op["comment"],
+                        prj, program_name, routine_name, actual_rn,
+                        op["comment"],
                     )
                 results.append({"index": i, "status": "ok", "action": "modify",
-                                "rung_number": rn})
+                                "rung_number": orig_rn})
 
             elif action == "duplicate":
+                orig_rn = op["rung_number"]
+                actual_rn = _to_actual(orig_rn)
                 subs = op.get("substitutions", {})
                 _programs.duplicate_rung_with_substitution(
-                    prj, program_name, routine_name, op["rung_number"],
+                    prj, program_name, routine_name, actual_rn,
                     subs,
                     new_comment=op.get("comment") or None,
                 )
+                # Duplicate inserts after the source rung, so
+                # original indices above it shift up.
+                _adjustments.append((orig_rn + 1, 1))
                 results.append({"index": i, "status": "ok", "action": "duplicate",
-                                "rung_number": op["rung_number"]})
+                                "rung_number": orig_rn})
 
             else:
                 results.append({"index": i, "status": "error",
@@ -1632,15 +1676,17 @@ def get_scope_references(
         rung_texts: list[tuple[int, str]] = []  # (rung_number, text)
 
         if routine_name:
-            all_rungs = prj.get_all_rungs(program_name, routine_name)
-            for r in all_rungs:
+            result = prj.get_all_rungs(program_name, routine_name, count=0)
+            for r in result["rungs"]:
                 rung_texts.append((r['number'], r['text']))
         else:
             # Scan all routines in the program
             routines_info = prj.list_routines(program_name)
             for rinfo in routines_info:
                 if rinfo.get('type', 'RLL') == 'RLL':
-                    for r in prj.get_all_rungs(program_name, rinfo['name']):
+                    res = prj.get_all_rungs(program_name, rinfo['name'],
+                                            count=0)
+                    for r in res["rungs"]:
                         rung_texts.append((r['number'], r['text']))
 
         # Apply rung_range filter
