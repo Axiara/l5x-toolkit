@@ -42,6 +42,7 @@ from . import validator as _validator
 from . import component_export as _comp_export
 from . import component_import as _comp_import
 from .models import Scope, RoutineType
+from .utils import deep_copy
 
 # ---------------------------------------------------------------------------
 # Logging (stderr only -- stdout is reserved for MCP protocol)
@@ -130,6 +131,82 @@ def _auto_convert_value(value_str: str, data_type: str):
             return float(value_str)
         except ValueError:
             return value_str
+
+
+# ---------------------------------------------------------------------------
+# Pre-validation helpers for batch tools
+# ---------------------------------------------------------------------------
+
+_MANAGE_TAGS_ACTIONS = {"create", "delete", "rename", "copy", "move", "create_alias"}
+_MANAGE_TAGS_REQUIRED: dict[str, list[str]] = {
+    "create": ["name", "data_type"],
+    "delete": ["name"],
+    "rename": ["name", "new_name"],
+    "copy": ["name", "new_name"],
+    "move": ["name", "to_scope"],
+    "create_alias": ["name", "alias_for"],
+}
+
+_MANAGE_RUNGS_ACTIONS = {"add", "delete", "modify", "duplicate"}
+_MANAGE_RUNGS_REQUIRED: dict[str, list[str]] = {
+    "add": ["text"],
+    "delete": ["rung_number"],
+    "modify": ["rung_number"],
+    "duplicate": ["rung_number"],
+}
+
+
+def _pre_validate_ops(
+    ops: list[dict],
+    valid_actions: set[str],
+    required_fields: dict[str, list[str]],
+    label: str,
+) -> list[dict] | None:
+    """Validate every operation in a batch before any are executed.
+
+    Returns a list of error dicts if any operation fails validation,
+    or ``None`` if all operations pass.
+    """
+    errors: list[dict] = []
+    for i, op in enumerate(ops):
+        action = op.get("action", "")
+        if not action:
+            errors.append({"index": i, "error": "Missing 'action' field."})
+            continue
+        if action not in valid_actions:
+            errors.append({
+                "index": i, "error": (
+                    f"Unknown action '{action}'. "
+                    f"Valid actions: {', '.join(sorted(valid_actions))}."
+                ),
+            })
+            continue
+        for field in required_fields.get(action, []):
+            if field not in op:
+                errors.append({
+                    "index": i, "action": action,
+                    "error": f"Missing required field '{field}'.",
+                })
+    if errors:
+        return errors
+    return None
+
+
+def _pre_validate_updates(updates: list[dict]) -> list[dict] | None:
+    """Validate update_tags operations before execution."""
+    errors: list[dict] = []
+    for i, upd in enumerate(updates):
+        if not upd.get("name"):
+            errors.append({"index": i, "error": "Missing required field 'name'."})
+        has_change = any(k in upd for k in ("value", "members", "description"))
+        if not has_change:
+            errors.append({
+                "index": i, "name": upd.get("name", ""),
+                "error": "No changes specified. Include 'value', 'members', or 'description'.",
+            })
+    if errors:
+        return errors
+    return None
 
 
 # ===================================================================
@@ -302,6 +379,8 @@ def query_project(
     scope: str = "",
     program_name: str = "",
     name_filter: str = "",
+    limit: int = 0,
+    offset: int = 0,
 ) -> str:
     """Query project contents -- programs, tags, modules, AOIs, UDTs, tasks.
 
@@ -318,6 +397,11 @@ def query_project(
         program_name: Required for 'routines'. For 'tags', filters to a
                       specific program when scope includes 'program'.
         name_filter: Optional glob pattern to filter names (e.g. 'Motor*').
+        limit: Maximum number of items to return per entity (0 = all).
+               Useful for paging through large tag lists.
+        offset: Number of items to skip before returning results.
+                Use with limit to page: offset=0,limit=100 then
+                offset=100,limit=100, etc.
     """
     prj = _require_project()
     try:
@@ -383,6 +467,24 @@ def query_project(
                             name_filter,
                         )
                     ]
+
+        # Apply pagination (limit/offset) to each entity list
+        if limit > 0 or offset > 0:
+            totals: dict = {}
+            for key in result:
+                items = result[key]
+                if isinstance(items, list):
+                    totals[key] = len(items)
+                    start = min(offset, len(items))
+                    if limit > 0:
+                        result[key] = items[start : start + limit]
+                    else:
+                        result[key] = items[start:]
+            result["_pagination"] = {
+                "offset": offset,
+                "limit": limit,
+                "totals": totals,
+            }
 
         return json.dumps(result, indent=2)
     except Exception as e:
@@ -588,6 +690,17 @@ def manage_tags(
     except json.JSONDecodeError as e:
         return f"Error: Invalid JSON -- {e}"
 
+    # Pre-validate all operations before executing any
+    validation_errors = _pre_validate_ops(
+        ops, _MANAGE_TAGS_ACTIONS, _MANAGE_TAGS_REQUIRED, "manage_tags",
+    )
+    if validation_errors:
+        return json.dumps({
+            "succeeded": 0, "failed": len(validation_errors),
+            "validation_errors": validation_errors,
+            "message": "No operations were executed. Fix validation errors and retry.",
+        }, indent=2)
+
     results = []
     for i, op in enumerate(ops):
         action = op.get("action", "")
@@ -707,6 +820,15 @@ def update_tags(
         updates = json.loads(updates_json)
     except json.JSONDecodeError as e:
         return f"Error: Invalid JSON -- {e}"
+
+    # Pre-validate all updates before executing any
+    validation_errors = _pre_validate_updates(updates)
+    if validation_errors:
+        return json.dumps({
+            "succeeded": 0, "failed": len(validation_errors),
+            "validation_errors": validation_errors,
+            "message": "No updates were executed. Fix validation errors and retry.",
+        }, indent=2)
 
     results = []
     for i, upd in enumerate(updates):
@@ -870,6 +992,23 @@ def manage_rungs(
     except json.JSONDecodeError as e:
         return f"Error: Invalid JSON -- {e}"
 
+    # Pre-validate all operations before executing any
+    validation_errors = _pre_validate_ops(
+        ops, _MANAGE_RUNGS_ACTIONS, _MANAGE_RUNGS_REQUIRED, "manage_rungs",
+    )
+    if validation_errors:
+        return json.dumps({
+            "succeeded": 0, "failed": len(validation_errors),
+            "validation_errors": validation_errors,
+            "message": "No operations were executed. Fix validation errors and retry.",
+        }, indent=2)
+
+    # Snapshot the RLLContent element for atomic rollback on failure.
+    # Only the targeted routine is copied, not the entire project tree.
+    routine_el = prj.programs.get_routine_element(program_name, routine_name)
+    rll_content = routine_el.find("RLLContent")
+    rll_snapshot = deep_copy(rll_content) if rll_content is not None else None
+
     # Track index adjustments so the caller can use original indices
     # throughout the batch.  Each entry is (threshold, delta) meaning
     # "original indices >= threshold shift by delta".
@@ -885,6 +1024,7 @@ def manage_rungs(
         return actual
 
     results = []
+    rollback_needed = False
     for i, op in enumerate(ops):
         action = op.get("action", "")
         try:
@@ -952,13 +1092,33 @@ def manage_rungs(
         except Exception as e:
             results.append({"index": i, "status": "error", "action": action,
                             "message": str(e)})
+            rollback_needed = True
+            break  # Stop executing further operations
 
-    succeeded = sum(1 for r in results if r["status"] == "ok")
+    # Atomic rollback: if any operation failed, restore the routine
+    if rollback_needed and rll_snapshot is not None:
+        current_rll = routine_el.find("RLLContent")
+        if current_rll is not None:
+            routine_el.remove(current_rll)
+        routine_el.append(rll_snapshot)
+        succeeded = 0
+        for r in results:
+            if r["status"] == "ok":
+                r["status"] = "rolled_back"
+    else:
+        succeeded = sum(1 for r in results if r["status"] == "ok")
+
     failed = sum(1 for r in results if r["status"] == "error")
-    return json.dumps(
-        {"succeeded": succeeded, "failed": failed, "details": results},
-        indent=2,
-    )
+    response: dict = {
+        "succeeded": succeeded, "failed": failed, "details": results,
+    }
+    if rollback_needed:
+        response["rolled_back"] = True
+        response["message"] = (
+            "An operation failed. All changes to this routine have been "
+            "rolled back to the state before this batch."
+        )
+    return json.dumps(response, indent=2)
 
 
 @mcp.tool()
