@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "l5x-plugin-tag-report"
+version = "1.0.0"
+description = "Tag reporting and naming-convention audit tools for the L5X Agent Toolkit"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+dependencies = [
+    "l5x_agent_toolkit>=0.2.0",
+]
+
+[project.entry-points."l5x_toolkit.plugins"]
+tag_report = "l5x_plugin_tag_report.plugin:TagReportPlugin"

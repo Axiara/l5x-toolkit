@@ -42,6 +42,7 @@ from . import validator as _validator
 from . import component_export as _comp_export
 from . import component_import as _comp_import
 from .models import Scope, RoutineType
+from .plugin import L5XPlugin, PluginContext, PluginRegistry
 from .utils import deep_copy
 
 # ---------------------------------------------------------------------------
@@ -76,6 +77,12 @@ mcp = FastMCP(
 _project: Optional[L5XProject] = None
 _project_path: Optional[str] = None
 
+# ---------------------------------------------------------------------------
+# Plugin infrastructure
+# ---------------------------------------------------------------------------
+_registry = PluginRegistry()
+_plugin_ctx: Optional[PluginContext] = None
+
 
 def _require_project() -> L5XProject:
     """Return the loaded project or raise an error."""
@@ -84,6 +91,22 @@ def _require_project() -> L5XProject:
             "No project loaded. Call load_project first."
         )
     return _project
+
+
+def _get_project_path() -> Optional[str]:
+    """Return the path of the loaded project (used by plugin context)."""
+    return _project_path
+
+
+def _build_plugin_context() -> PluginContext:
+    """Construct the PluginContext that plugins receive."""
+    from . import __version__
+    return PluginContext(
+        get_project=_require_project,
+        get_project_path=_get_project_path,
+        mcp=mcp,
+        toolkit_version=__version__,
+    )
 
 
 def _normalize_path(raw_path: str) -> str:
@@ -294,6 +317,10 @@ def load_project(file_path: str) -> str:
                 f"Modules: {summary['module_count']}"
             )
 
+        # Notify plugins that a project was loaded
+        if _plugin_ctx is not None:
+            _registry.notify_project_loaded(_plugin_ctx)
+
         return '\n'.join(lines)
     except Exception as e:
         _project = None
@@ -315,6 +342,9 @@ def save_project(file_path: str = "") -> str:
     try:
         prj.write(dest)
         log.info("Saved project to: %s", dest)
+        # Notify plugins that the project was saved
+        if _plugin_ctx is not None:
+            _registry.notify_project_saved(_plugin_ctx)
         return f"Project saved to: {dest}"
     except Exception as e:
         return f"Error saving project: {e}"
@@ -2536,11 +2566,44 @@ def detect_conflicts(
 
 
 # ---------------------------------------------------------------------------
+# Plugin introspection tool
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def list_plugins() -> str:
+    """List all loaded plugins and the tools they provide.
+
+    Returns a JSON object with plugin names, versions, descriptions,
+    and the tool names each plugin registered.
+    """
+    plugins = []
+    for name, rec in _registry.loaded_plugins.items():
+        plugins.append({
+            "name": name,
+            "version": rec.plugin.version,
+            "description": rec.plugin.description,
+            "source": rec.source,
+            "tools": rec.tools_registered,
+        })
+    return json.dumps({"plugins": plugins, "total": len(plugins)}, indent=2)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main():
     """Run the MCP server on stdio transport."""
+    global _plugin_ctx
+
+    # Discover and load plugins before starting the server
+    _plugin_ctx = _build_plugin_context()
+    loaded = _registry.discover_and_load(_plugin_ctx)
+    if loaded:
+        log.info("Loaded %d plugin(s): %s", len(loaded), ", ".join(loaded))
+    else:
+        log.info("No plugins found.")
+
     mcp.run(transport="stdio")
 
 

@@ -55,7 +55,7 @@ Usage:
     project.write('path/to/output.L5X')
 """
 
-__version__ = '0.1.0'
+__version__ = '0.2.0'
 
 
 def __getattr__(name):
@@ -63,9 +63,14 @@ def __getattr__(name):
     if name == 'L5XProject':
         from .project import L5XProject
         return L5XProject
+    if name in ('L5XPlugin', 'PluginContext'):
+        from .plugin import L5XPlugin, PluginContext
+        return L5XPlugin if name == 'L5XPlugin' else PluginContext
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
     'L5XProject',
+    'L5XPlugin',
+    'PluginContext',
 ]

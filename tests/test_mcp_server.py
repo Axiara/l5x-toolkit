@@ -105,9 +105,9 @@ def _load_test_project(tmp_path):
 # ===================================================================
 
 class TestToolCount:
-    def test_total_tools_is_31(self):
+    def test_total_tools_is_32(self):
         tools = list(mcp_server.mcp._tool_manager._tools.values())
-        assert len(tools) == 31
+        assert len(tools) == 32  # 31 core + 1 plugin introspection (list_plugins)
 
 
 # ===================================================================
