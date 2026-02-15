@@ -32,7 +32,6 @@ This means you can describe PLC modifications in plain English ("create a DINT t
 ### Prerequisites
 
 - **Python 3.9 or later** (check with `python --version`)
-- **pip** (included with Python)
 
 ### Step-by-step install
 
@@ -57,6 +56,23 @@ This means you can describe PLC modifications in plain English ("create a DINT t
    ```bash
    python -c "from l5x_agent_toolkit import L5XProject; print('OK')"
    ```
+
+### Troubleshooting: `pip` is not recognized
+
+If you get `'pip' is not recognized as an internal or external command` but `python --version` works, Python's `Scripts` folder is not on your system PATH. To fix this:
+
+1. Open the **Start menu** and search for **"Environment Variables"**.
+2. Click **"Edit the system environment variables"**.
+3. Click **Environment Variables** at the bottom.
+4. Under **User variables** (or **System variables**), find `Path` and click **Edit**.
+5. Click **New** and add the path to Python's `Scripts` folder. This is typically:
+   - `C:\Users\<YourName>\AppData\Local\Programs\Python\Python3xx\Scripts`
+   - or `C:\Python3xx\Scripts`
+
+   To find the exact path, run `python -c "import sys; print(sys.exec_prefix + '\\Scripts')"` in your terminal.
+6. Click **OK** on all dialogs, then **close and reopen your terminal**.
+
+After that, `pip` should work directly.
 
 ## MCP Server Setup
 
