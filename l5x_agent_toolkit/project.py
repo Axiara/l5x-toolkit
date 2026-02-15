@@ -225,17 +225,22 @@ class L5XProject:
         if self._root is None:
             raise RuntimeError("No project loaded. Call load() first.")
 
-        # Serialize the tree to bytes
+        # Serialize the tree *without* lxml's XML declaration (it uses
+        # single quotes which crash Studio 5000).  We prepend the
+        # double-quoted declaration manually.
         xml_bytes = etree.tostring(
             self._root,
-            xml_declaration=True,
-            encoding='UTF-8',
-            standalone=True,
+            xml_declaration=False,
+            encoding='unicode',
             pretty_print=False,
         )
 
+        xml_string = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            + xml_bytes
+        )
+
         # Post-process: restore CDATA sections for specific elements.
-        xml_string = xml_bytes.decode('utf-8')
         xml_string = self._restore_cdata_sections(xml_string)
 
         # Write with UTF-8 BOM (matches Studio 5000 output)

@@ -927,6 +927,25 @@ class TestFullWorkflow:
         assert info_data["Severity"] == 900
 
 
+class TestSaveProject:
+    """Verify save_project produces Studio 5000-compatible output."""
+
+    def test_xml_declaration_uses_double_quotes(self, tmp_path):
+        out = tmp_path / "output.L5X"
+        result = mcp_server.save_project(str(out))
+        assert "Error" not in result
+        content = out.read_text(encoding="utf-8-sig")
+        first_line = content.split("\n", 1)[0]
+        assert first_line == '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+
+    def test_save_roundtrip_preserves_content(self, tmp_path):
+        out = tmp_path / "output.L5X"
+        mcp_server.save_project(str(out))
+        content = out.read_text(encoding="utf-8-sig")
+        assert "<RSLogix5000Content" in content
+        assert "MainProgram" in content
+
+
 # ===================================================================
 # Richer fixture for analysis tools
 # ===================================================================
