@@ -117,6 +117,8 @@ def _normalize_path(raw_path: str) -> str:
 
 def _auto_convert_value(value_str: str, data_type: str):
     """Convert a string value to the appropriate Python type for a tag."""
+    if data_type == 'STRING':
+        return value_str
     if data_type in ('REAL', 'LREAL'):
         return float(value_str)
     if data_type == 'BOOL':
@@ -124,7 +126,10 @@ def _auto_convert_value(value_str: str, data_type: str):
     try:
         return int(value_str)
     except ValueError:
-        return float(value_str)
+        try:
+            return float(value_str)
+        except ValueError:
+            return value_str
 
 
 # ===================================================================
@@ -715,10 +720,14 @@ def update_tags(
             # Set member values
             if "members" in upd:
                 for member_path, member_val in upd["members"].items():
+                    val_str = str(member_val)
                     try:
-                        py_val = int(str(member_val))
+                        py_val = int(val_str)
                     except ValueError:
-                        py_val = float(str(member_val))
+                        try:
+                            py_val = float(val_str)
+                        except ValueError:
+                            py_val = val_str
                     _tags.set_tag_member_value(
                         prj, tag_name, member_path, py_val,
                         scope=upd_scope, program_name=upd_prog,
