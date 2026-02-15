@@ -2,7 +2,7 @@
 
 ## 1. Introduction
 
-This document is your complete reference for using the L5X Agent Toolkit MCP server. The toolkit provides 42 validated tools for reading and modifying Rockwell Automation Studio 5000 L5X project files. You will use these tools to manipulate PLC (Programmable Logic Controller) programs for industrial automation systems.
+This document is your complete reference for using the L5X Agent Toolkit MCP server. The toolkit provides 31 validated, batch-capable tools for reading and modifying Rockwell Automation Studio 5000 L5X project files. You will use these tools to manipulate PLC (Programmable Logic Controller) programs for industrial automation systems.
 
 ### The Cardinal Rule
 
@@ -72,7 +72,9 @@ Every tag carries its value in two synchronized formats:
 - **`<Data Format="L5K">`** -- Compact text: `0` for scalars, `[0,0,0]` for structures, `[0,0,0,0,0]` for arrays.
 - **`<Data Format="Decorated">`** -- Verbose XML with named members, types, and radixes.
 
-These two formats MUST stay in sync. The toolkit handles this automatically when you use `set_tag_value` or `set_tag_member_value`. Never attempt to update one format without the other.
+These two formats MUST stay in sync. The toolkit handles this automatically when you use `update_tags`. Never attempt to update one format without the other.
+
+If L5K data is out of sync with Decorated data, use `strip_l5k_data` to remove the L5K data. Studio 5000 will regenerate it from the Decorated format on import.
 
 ---
 
@@ -153,7 +155,7 @@ UDTs are custom structures defined in the project's `DataTypes` section. Key poi
 
 - Members can be any type: base types, other UDTs, arrays, or BIT type.
 - BOOL members use a special bit-packing pattern: a hidden SINT backing member (named with `ZZZZZZZZZZ` prefix) stores the actual bits, and visible `BIT` members reference it via `Target` and `BitNumber` attributes.
-- The toolkit's `get_udt_members` returns only visible members (excludes hidden backing fields).
+- The toolkit's `get_entity_info` (with `include='members'`) returns only visible members (excludes hidden backing fields).
 - UDTs that reference other UDTs create dependency chains. Dependencies must be defined before the types that use them.
 
 ### Add-On Instructions (AOIs)
@@ -388,9 +390,15 @@ XIC(MasterEnable)[OTE(Output1) ,OTE(Output2) ,OTE(Output3) ];
 
 ### Creating Tags
 
-Use `create_tag` with these parameters:
+Use `manage_tags` with the `create` action:
 
-| Parameter | Required | Description |
+```json
+[{"action": "create", "name": "MotorSpeed", "data_type": "DINT", "description": "Speed setpoint RPM"}]
+```
+
+Available fields for create operations:
+
+| Field | Required | Description |
 |-----------|----------|-------------|
 | `name` | Yes | Tag name (see naming rules below) |
 | `data_type` | Yes | Any base type, built-in structure, UDT, or AOI name |
@@ -410,12 +418,17 @@ Use `create_tag` with these parameters:
 
 ### Setting Tag Values
 
-For **scalar tags** (DINT, REAL, BOOL, etc.), use `set_tag_value`:
-```
-set_tag_value(name="MyCounter", value="42")
+Use `update_tags` to set values and descriptions on one or more tags.
+
+For **scalar tags** (DINT, REAL, BOOL, etc.):
+```json
+[{"name": "MyCounter", "value": "42"}]
 ```
 
-For **structured or array tags**, use `set_tag_member_value` with a member path:
+For **structured or array tags**, use the `members` field with member paths:
+```json
+[{"name": "MyTimer", "members": {"PRE": "5000"}}]
+```
 
 | Path Pattern | Example | Target |
 |--------------|---------|--------|
@@ -432,14 +445,26 @@ For **structured or array tags**, use `set_tag_member_value` with a member path:
 
 ### Batch Tag Creation
 
-Use `batch_create_tags` with a JSON array:
+Use `manage_tags` with multiple create operations in a single call:
 ```json
 [
-  {"name": "Zone1_Timer", "data_type": "TIMER", "description": "Zone 1 transport timer"},
-  {"name": "Zone1_Speed", "data_type": "DINT", "description": "Zone 1 speed setpoint"},
-  {"name": "Zone1_Enable", "data_type": "BOOL", "description": "Zone 1 enable flag"}
+  {"action": "create", "name": "Zone1_Timer", "data_type": "TIMER", "description": "Zone 1 transport timer"},
+  {"action": "create", "name": "Zone1_Speed", "data_type": "DINT", "description": "Zone 1 speed setpoint"},
+  {"action": "create", "name": "Zone1_Enable", "data_type": "BOOL", "description": "Zone 1 enable flag"}
 ]
 ```
+
+### Other Tag Actions
+
+`manage_tags` supports these additional actions in the same batch:
+
+| Action | Description | Key Fields |
+|--------|-------------|------------|
+| `delete` | Remove a tag | `name` |
+| `rename` | Rename with reference updates | `name`, `new_name`, `update_references` (default true) |
+| `copy` | Copy a tag | `name`, `new_name`, `to_scope`, `to_program_name` |
+| `move` | Move between scopes | `name`, `to_scope`, `to_program` |
+| `create_alias` | Create an alias tag | `name`, `alias_for`, `description` |
 
 ---
 
@@ -463,48 +488,40 @@ Valid routine types: `RLL` (Relay Ladder Logic), `ST` (Structured Text), `FBD` (
 
 ### Adding Rungs
 
-Use `add_rung` to add instruction text to a routine:
+Use `manage_rungs` with the `add` action:
 
-```
-add_rung(
-    program_name="TransportLine1",
-    routine_name="MainRoutine",
-    instruction_text="XIC(StartPB)OTE(MotorRun);",
-    comment="Start pushbutton energizes motor",
-    position=-1
-)
+```json
+[{"action": "add", "text": "XIC(StartPB)OTE(MotorRun);", "comment": "Start pushbutton energizes motor"}]
 ```
 
-Position: `-1` appends to end; `0` inserts at beginning; any non-negative integer inserts at that index.
+Position: `-1` or omit to append to end; `0` inserts at beginning; any non-negative integer inserts at that index.
 
 ### Modifying Existing Rungs
 
-Use `modify_rung_text` to replace the instruction text of an existing rung:
+Use `manage_rungs` with the `modify` action:
 
-```
-modify_rung_text(
-    program_name="TransportLine1",
-    routine_name="MainRoutine",
-    rung_number=3,
-    new_text="XIC(NewStartPB)OTE(MotorRun);"
-)
+```json
+[{"action": "modify", "rung_number": 3, "text": "XIC(NewStartPB)OTE(MotorRun);"}]
 ```
 
-### The duplicate_rung_with_substitution Pattern
+You can modify just the text, just the comment, or both in the same operation.
 
-This is THE key tool for bulk operations. It duplicates a rung and replaces tag names according to a substitution map. The new rung is inserted immediately after the original.
+### The Duplicate Pattern
 
-```
-duplicate_rung_with_substitution(
-    program_name="TransportLine1",
-    routine_name="MainRoutine",
-    rung_number=0,
-    substitutions_json='{"Conv_A0010": "Conv_A0020", "Z1": "Z3", "Z2": "Z4"}',
-    comment="Zone 2 transport logic"
-)
+The `duplicate` action in `manage_rungs` is THE key pattern for bulk operations. It duplicates a rung and replaces tag names according to a substitution map:
+
+```json
+[{
+  "action": "duplicate",
+  "rung_number": 0,
+  "substitutions": {"Conv_A0010": "Conv_A0020", "Z1": "Z3", "Z2": "Z4"},
+  "comment": "Zone 2 transport logic"
+}]
 ```
 
 Substitutions use word-boundary-safe replacement to prevent partial matches (e.g., replacing `Tag1` will not affect `Tag10`).
+
+When batching multiple rung operations, use the rung indices as they were **before any operations in the batch**. The toolkit automatically adjusts indices for insertions and deletions within the same batch.
 
 ### Scheduling Programs to Tasks
 
@@ -518,13 +535,8 @@ schedule_program(task_name="MainTask", program_name="TransportLine1")
 
 To call a subroutine from MainRoutine, add a JSR rung:
 
-```
-add_rung(
-    program_name="TransportLine1",
-    routine_name="MainRoutine",
-    instruction_text="JSR(FaultHandler,FaultCode,FaultMsg);",
-    comment="Call fault handler subroutine"
-)
+```json
+[{"action": "add", "text": "JSR(FaultHandler,FaultCode,FaultMsg);", "comment": "Call fault handler subroutine"}]
 ```
 
 ---
@@ -538,7 +550,7 @@ Add-On Instructions (AOIs) are reusable, encapsulated logic blocks -- similar to
 ### Importing an AOI
 
 ```
-import_aoi(file_path="C:/Templates/AOIs/MDR_Transport_AOI_v1.L5X", overwrite=false)
+import_component(file_path="C:/Templates/AOIs/MDR_Transport_AOI_v1.L5X", conflict_resolution="skip")
 ```
 
 This automatically:
@@ -546,13 +558,14 @@ This automatically:
 - Imports any dependent UDTs found in the source file
 - Imports any dependent AOIs found in the source file
 - Updates the `EditedDate` to the current UTC time (required for Studio 5000 acceptance)
+- Detects conflicts with existing definitions and handles them according to the `conflict_resolution` setting
 
 ### Querying AOI Parameters
 
 Before calling an AOI in a rung, query its parameters to understand the interface:
 
 ```
-get_aoi_parameters(name="MDR_Transport_AOI")
+get_entity_info(entity="aoi", name="MDR_Transport_AOI", include="parameters")
 ```
 
 Returns each parameter's name, data type, usage (Input/Output/InOut), required flag, and description.
@@ -565,10 +578,10 @@ The instance tag is always the first argument. Subsequent arguments correspond t
 
 ### Common Pattern: Import, Create Instance, Add Call
 
-1. Import the AOI: `import_aoi(file_path="...")`
-2. Query its parameters: `get_aoi_parameters(name="MyAOI")`
-3. Create the instance tag: `create_tag(name="MyAOI_Inst", data_type="MyAOI")`
-4. Add the call rung: `add_rung(..., instruction_text="MyAOI(MyAOI_Inst,Input1,Output1);")`
+1. Import the AOI: `import_component(file_path="...")`
+2. Query its parameters: `get_entity_info(entity="aoi", name="MyAOI", include="parameters")`
+3. Create the instance tag: `manage_tags` with `{"action": "create", "name": "MyAOI_Inst", "data_type": "MyAOI"}`
+4. Add the call rung: `manage_rungs` with `{"action": "add", "text": "MyAOI(MyAOI_Inst,Input1,Output1);"}`
 
 ---
 
@@ -581,31 +594,25 @@ User-Defined Types (UDTs) are custom data structures. They define a named collec
 ### Importing a UDT
 
 ```
-import_udt(file_path="C:/Templates/UDTs/PalletDataTracking_DataType.L5X", overwrite=false)
+import_component(file_path="C:/Templates/UDTs/PalletDataTracking_DataType.L5X", conflict_resolution="skip")
 ```
 
 This automatically handles transitive dependency chains: if UDT_A references UDT_B which references UDT_C, all three are imported in the correct order.
 
 ### Querying UDT Members
 
-```
-get_udt_members(name="PalletDataTracking")
-```
-
-Returns visible members only (excludes hidden SINT backing fields for BIT-packed BOOLs).
-
-For ALL members including hidden backing fields:
+For visible members only (excludes hidden SINT backing fields for BIT-packed BOOLs):
 
 ```
-get_udt_info(name="PalletDataTracking")
+get_entity_info(entity="udt", name="PalletDataTracking", include="members")
 ```
 
 ### Creating Tags of UDT Type
 
 After importing a UDT, create tags of that type:
 
-```
-create_tag(name="Pallet_Data", data_type="PalletDataTracking", description="Pallet tracking data")
+```json
+[{"action": "create", "name": "Pallet_Data", "data_type": "PalletDataTracking", "description": "Pallet tracking data"}]
 ```
 
 The toolkit generates correct default values for both L5K and Decorated formats, including all nested members.
@@ -619,27 +626,26 @@ The toolkit generates correct default values for both L5K and Decorated formats,
 Modules have complex internal structures (connection configuration, I/O data, communication settings). Always import from a template rather than creating from scratch:
 
 ```
-import_module(
-    template_path="C:/Templates/Modules/FieldIO/5069_IB16.L5X",
-    name="InputModule_Slot3",
+import_component(
+    file_path="C:/Templates/Modules/FieldIO/5069_IB16.L5X",
+    module_name="InputModule_Slot3",
     parent_module="Local",
-    slot="3",
-    description="Digital inputs - Station 1"
+    module_slot="3"
 )
 ```
 
 ### Setting Addresses
 
-For Ethernet modules (IP address on downstream port):
+For Ethernet modules (IP address):
 
 ```
-import_module(template_path="...", name="ENBT_Remote1", parent_module="Local", address="192.168.1.100")
+import_component(file_path="...", module_name="ENBT_Remote1", parent_module="Local", module_address="192.168.1.100")
 ```
 
-For backplane modules (slot on upstream port):
+For backplane modules (slot number):
 
 ```
-import_module(template_path="...", name="IO_Card_Slot5", parent_module="Local", slot="5")
+import_component(file_path="...", module_name="IO_Card_Slot5", parent_module="Local", module_slot="5")
 ```
 
 ### Module Hierarchy
@@ -695,69 +701,74 @@ The validator performs 9 categories of checks:
 ```
 Step 1: load_project(file_path="C:/Projects/Plant.L5X")
 
-Step 2: create_tag(name="Conv_A0010_Controller", data_type="MDR_Transport_AOI",
-                   scope="controller", description="Conveyor A0010 controller")
+Step 2: manage_tags with operations:
+        [{"action": "create", "name": "Conv_A0010_Controller",
+          "data_type": "MDR_Transport_AOI",
+          "description": "Conveyor A0010 controller"},
+         {"action": "create", "name": "Conv_A0010_Z1",
+          "data_type": "DINT",
+          "description": "Zone 1 speed"}]
 
-Step 3: create_tag(name="Conv_A0010_Z1", data_type="DINT",
-                   scope="controller", description="Zone 1 speed")
+Step 3: create_program(name="Conv_A0010", description="Conveyor A0010 control")
 
-Step 4: create_program(name="Conv_A0010", description="Conveyor A0010 control")
+Step 4: manage_rungs with operations:
+        [{"action": "add",
+          "text": "MDR_Transport_AOI(Conv_A0010_Controller,Conv_A0010_Z1,Conv_A0010_Z2,Conv_A0010_Z3);",
+          "comment": "Main transport AOI call"}]
 
-Step 5: add_rung(program_name="Conv_A0010", routine_name="MainRoutine",
-                 instruction_text="MDR_Transport_AOI(Conv_A0010_Controller,Conv_A0010_Z1,Conv_A0010_Z2,Conv_A0010_Z3);",
-                 comment="Main transport AOI call")
+Step 5: schedule_program(task_name="MainTask", program_name="Conv_A0010")
 
-Step 6: schedule_program(task_name="MainTask", program_name="Conv_A0010")
+Step 6: validate_project()
 
-Step 7: validate_project()
-
-Step 8: save_project(file_path="C:/Projects/Plant_Modified.L5X")
+Step 7: save_project(file_path="C:/Projects/Plant_Modified.L5X")
 ```
 
 ### b. Duplicate Logic for 10 Similar Devices
 
 ```
-Step 1: Create the base rung with add_rung for device 1.
+Step 1: Add the base rung with manage_rungs (action: add) for device 1.
 
-Step 2: For devices 2 through 10, use duplicate_rung_with_substitution:
+Step 2: For devices 2 through 10, use manage_rungs with the duplicate action.
 
-  duplicate_rung_with_substitution(
-      program_name="Transport", routine_name="MainRoutine",
-      rung_number=0,
-      substitutions_json='{"Dev_001": "Dev_002", "Timer_001": "Timer_002"}')
+  manage_rungs with operations:
+  [{"action": "duplicate", "rung_number": 0,
+    "substitutions": {"Dev_001": "Dev_002", "Timer_001": "Timer_002"}}]
 
-  duplicate_rung_with_substitution(
-      program_name="Transport", routine_name="MainRoutine",
-      rung_number=1,
-      substitutions_json='{"Dev_001": "Dev_003", "Timer_001": "Timer_003"}')
+  manage_rungs with operations:
+  [{"action": "duplicate", "rung_number": 0,
+    "substitutions": {"Dev_001": "Dev_003", "Timer_001": "Timer_003"}}]
 
   ... and so on for each device.
 
-Important: After each duplication, the new rung is inserted immediately after
-the source rung, so rung indices shift. Plan your indices accordingly or
-always duplicate from the original rung (rung 0) and adjust the index.
+  Note: When batching multiple duplications in a single manage_rungs call,
+  use the original rung indices -- the toolkit automatically adjusts for
+  insertions within the same batch.
 ```
 
 ### c. Import an AOI and Wire It Up
 
 ```
-Step 1: import_aoi(file_path="C:/Templates/AOIs/VacuumControl_AOI.L5X")
+Step 1: import_component(file_path="C:/Templates/AOIs/VacuumControl_AOI.L5X")
 
-Step 2: get_aoi_parameters(name="VacuumControl_AOI")
+Step 2: get_entity_info(entity="aoi", name="VacuumControl_AOI", include="parameters")
 
-Step 3: create_tag(name="Vacuum_Station1", data_type="VacuumControl_AOI",
-                   scope="controller", description="Station 1 vacuum control")
+Step 3: manage_tags with operations:
+        [{"action": "create", "name": "Vacuum_Station1",
+          "data_type": "VacuumControl_AOI",
+          "description": "Station 1 vacuum control"}]
 
-Step 4: add_rung(program_name="StationControl", routine_name="MainRoutine",
-                 instruction_text="VacuumControl_AOI(Vacuum_Station1,VacRequest,VacSensor,VacValve);",
-                 comment="Station 1 vacuum control AOI call")
+Step 4: manage_rungs with operations:
+        [{"action": "add",
+          "text": "VacuumControl_AOI(Vacuum_Station1,VacRequest,VacSensor,VacValve);",
+          "comment": "Station 1 vacuum control AOI call"}]
 ```
 
 ### d. Rename a Tag Across the Project
 
 ```
-rename_tag(old_name="OldMotorTag", new_name="Motor_Station1",
-           scope="controller", update_references=true)
+manage_tags with operations:
+[{"action": "rename", "name": "OldMotorTag", "new_name": "Motor_Station1",
+  "update_references": true}]
 ```
 
 This updates the tag definition AND all rung text references across all programs.
@@ -765,24 +776,22 @@ This updates the tag definition AND all rung text references across all programs
 ### e. Add a New I/O Module
 
 ```
-import_module(
-    template_path="C:/Templates/Modules/FieldIO/5069_IB16.L5X",
-    name="DI_Station2",
+import_component(
+    file_path="C:/Templates/Modules/FieldIO/5069_IB16.L5X",
+    module_name="DI_Station2",
     parent_module="Local",
-    slot="5",
-    description="Station 2 digital inputs")
+    module_slot="5")
 ```
 
 ### f. Modify Timer Presets in Bulk
 
 ```
-Step 1: list_controller_tags()
+Step 1: query_project(entity="tags", scope="controller")
 
-Step 2: For each timer tag:
-        set_tag_member_value(name="TransportTimer_Z1", member_path="PRE",
-                             value="5000", scope="controller")
-        set_tag_member_value(name="TransportTimer_Z2", member_path="PRE",
-                             value="5000", scope="controller")
+Step 2: Use update_tags with multiple updates in a single call:
+        [{"name": "TransportTimer_Z1", "members": {"PRE": "5000"}},
+         {"name": "TransportTimer_Z2", "members": {"PRE": "5000"}},
+         {"name": "TransportTimer_Z3", "members": {"PRE": "5000"}}]
 ```
 
 ---
@@ -801,21 +810,21 @@ Step 2: For each timer tag:
 
 5. **Controller child element ordering matters.** DataTypes before Modules before AddOnInstructionDefinitions before Tags before Programs before Tasks. The toolkit enforces this, but if you ever see an ordering error in validation, it is serious.
 
-6. **L5K and Decorated data must stay in sync.** If they differ, Studio 5000 may crash or silently use the wrong values. The toolkit handles this automatically through `set_tag_value` and `set_tag_member_value`.
+6. **L5K and Decorated data must stay in sync.** If they differ, Studio 5000 may crash or silently use the wrong values. The toolkit handles this automatically through `update_tags`. If you suspect data is out of sync, use `strip_l5k_data` to remove L5K data and let Studio 5000 regenerate it on import.
 
-7. **AOI EditedDate must be current.** When importing or modifying an AOI, its `EditedDate` attribute must be updated to a recent UTC timestamp or Studio 5000 silently skips the import. The toolkit handles this automatically via `import_aoi`.
+7. **AOI EditedDate must be current.** When importing or modifying an AOI, its `EditedDate` attribute must be updated to a recent UTC timestamp or Studio 5000 silently skips the import. The toolkit handles this automatically via `import_component`.
 
 ### Important Considerations
 
 8. **Import dependencies before dependents.** Import UDTs before creating tags that use them. Import AOIs before creating instance tags. The toolkit import functions handle embedded dependencies automatically, but you must import the files in the right order if dependencies span multiple files.
 
-9. **String types are structures.** STRING is not a simple scalar. It has LEN (DINT) and DATA (SINT[82]) members. Use `set_tag_member_value` to modify string tag members.
+9. **String types are structures.** STRING is not a simple scalar. It has LEN (DINT) and DATA (SINT[82]) members. Use `update_tags` with the `members` field to modify string tag members.
 
 10. **BOOL members in UDTs use bit-packing.** Visible BOOL members in UDTs are actually BIT references into hidden SINT backing fields. The toolkit handles this in data format generation.
 
 11. **Program-scope tags are only visible within that program.** Controller-scope tags are globally visible. If a rung references a tag that exists in the wrong scope, validation will flag it as a warning.
 
-12. **Rung indices shift after insertions and deletions.** After using `add_rung` with a position or `duplicate_rung_with_substitution`, subsequent rung indices change. Use `get_all_rungs` to re-check indices if needed.
+12. **Rung indices shift after insertions and deletions.** When batching multiple rung operations in `manage_rungs`, use the original indices -- the toolkit adjusts automatically within the same batch. Between separate `manage_rungs` calls, use `get_all_rungs` to re-check indices if needed.
 
 13. **Routine type is immutable after creation.** You cannot change an RLL routine to ST or vice versa. Create a new routine with the correct type.
 
@@ -832,37 +841,22 @@ Step 2: For each timer tag:
 |------|-------------|
 | `load_project` | Load an L5X file (CALL FIRST) |
 | `save_project` | Save to L5X file (validate first) |
+| `format_project` | Pretty-print project XML with consistent indentation |
+| `strip_l5k_data` | Remove L5K data, keeping Decorated format only |
 | `get_project_summary` | Project metadata and counts |
 
 ### Query Tools
 | Tool | Description |
 |------|-------------|
-| `list_programs` | All program names |
-| `list_routines` | Routines in a program |
-| `list_controller_tags` | All controller-scope tags |
-| `list_program_tags` | Tags in a specific program |
-| `list_modules` | All I/O modules |
-| `list_aois` | All AOI definitions |
-| `list_udts` | All UDT definitions |
-| `list_tasks` | All tasks with schedules |
-| `get_all_rungs` | All rungs in a routine |
-| `get_tag_info` | Detailed tag information |
-| `get_aoi_info` | Detailed AOI information |
-| `get_aoi_parameters` | AOI parameter list |
-| `get_udt_info` | Detailed UDT information |
-| `get_udt_members` | UDT visible members |
-| `find_tag_references` | Where a tag is used |
+| `query_project` | Query programs, tags, modules, AOIs, UDTs, tasks (with filtering and pagination) |
+| `get_entity_info` | Detailed info for a tag, AOI, UDT, or rung (with optional value/references/parameters/members) |
+| `get_all_rungs` | All rungs in a routine (with pagination) |
 
 ### Tag Operations
 | Tool | Description |
 |------|-------------|
-| `create_tag` | Create a new tag |
-| `delete_tag` | Remove a tag |
-| `rename_tag` | Rename with reference updates |
-| `set_tag_value` | Set scalar tag value |
-| `set_tag_member_value` | Set structure/array member |
-| `set_tag_description` | Set tag description |
-| `batch_create_tags` | Create multiple tags at once |
+| `manage_tags` | Batch tag CRUD: create, delete, rename, copy, move, create_alias |
+| `update_tags` | Batch set values, member values, and descriptions |
 
 ### Program and Routine Operations
 | Tool | Description |
@@ -870,25 +864,37 @@ Step 2: For each timer tag:
 | `create_program` | New program with MainRoutine |
 | `delete_program` | Remove program and unschedule |
 | `create_routine` | New routine in a program |
-| `add_rung` | Add rung to RLL routine |
-| `delete_rung` | Remove a rung by index |
-| `modify_rung_text` | Replace rung instruction text |
-| `set_rung_comment` | Set/update rung comment |
-| `duplicate_rung_with_substitution` | Clone rung with tag replacements |
+| `manage_rungs` | Batch rung operations: add, delete, modify, duplicate |
 | `schedule_program` | Assign program to task |
 | `unschedule_program` | Remove program from task |
 
-### Import Operations
+### Import and Export Operations
 | Tool | Description |
 |------|-------------|
-| `import_aoi` | Import AOI from L5X file |
-| `import_udt` | Import UDT from L5X file |
-| `import_module` | Import module from template |
+| `import_component` | Import AOI, UDT, module, program, routine, or rung from L5X file |
+| `analyze_import` | Dry-run conflict analysis for an import file |
+| `create_export_shell` | Create an empty export shell (rung, routine, or program) |
+| `export_component` | Export a component to a standalone L5X file |
+
+### Alarm Management
+| Tool | Description |
+|------|-------------|
+| `manage_alarms` | Create, configure, and inspect alarm tags |
+| `manage_alarm_definitions` | Manage DatatypeAlarmDefinitions for UDTs/AOIs |
+| `list_alarms` | List all alarm tags and conditions |
+
+### Analysis and Cross-Reference
+| Tool | Description |
+|------|-------------|
+| `find_tag_references` | Find where a tag is used in rung text |
+| `get_scope_references` | All tags and AOI calls within a program/routine scope |
+| `find_references` | Batch reverse-lookup for tags, AOIs, or UDTs |
+| `get_tag_values` | Batch tag value retrieval with member expansion |
+| `compare_tag_instances` | Find duplicate structured tag instances |
 
 ### Validation and Utilities
 | Tool | Description |
 |------|-------------|
 | `validate_project` | Run all validation checks |
-| `validate_rung_syntax` | Check rung text syntax |
-| `substitute_tags_in_rung` | Replace tags in rung text |
-| `extract_tag_references_from_rung` | List tags used in a rung |
+| `analyze_rung_text` | Validate, extract tags from, or substitute tags in rung text |
+| `detect_conflicts` | Find tag shadowing, unused tags, scope duplicates |
