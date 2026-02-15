@@ -26,12 +26,15 @@ resolution of custom structure members.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, List, Optional
 
 from lxml import etree
 
 from .schema import BASE_DATA_TYPES, BUILTIN_STRUCTURES
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

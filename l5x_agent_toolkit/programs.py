@@ -15,6 +15,7 @@ Function Chart (SFC).
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Optional, Union
 
 from lxml import etree
@@ -30,6 +31,8 @@ from .utils import (
     set_description,
     validate_tag_name,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +319,7 @@ def create_program(
         ValueError: If *name* violates L5X naming rules or a program with
             this name already exists.
     """
+    logger.info("Creating program %r", name)
     validate_tag_name(name)
 
     programs = _find_programs_container(project)
@@ -379,6 +383,7 @@ def delete_program(
     Raises:
         KeyError: If no program with the given name exists.
     """
+    logger.info("Deleting program %r", name)
     program = _find_program(project, name)
     programs = _find_programs_container(project)
 
@@ -433,6 +438,7 @@ def create_routine(
             already exists in the program.
         KeyError: If the program does not exist.
     """
+    logger.info("Creating routine %r in program %r (type=%s)", routine_name, program_name, routine_type)
     validate_tag_name(routine_name)
 
     routine_type_upper = routine_type.upper()
@@ -489,6 +495,7 @@ def delete_routine(
     Raises:
         KeyError: If the program or routine does not exist.
     """
+    logger.info("Deleting routine %r from program %r", routine_name, program_name)
     routine = _find_routine(project, program_name, routine_name)
     routines = _find_routines_container(project, program_name)
     routines.remove(routine)
@@ -545,6 +552,7 @@ def add_rung(
         ValueError: If the routine is not an RLL routine.
         IndexError: If *position* is out of range.
     """
+    logger.info("Adding rung to %s/%s", program_name, routine_name)
     routine = _find_routine(project, program_name, routine_name)
     rll_content = _find_rll_content(routine)
 
@@ -612,6 +620,7 @@ def delete_rung(
         ValueError: If the routine is not an RLL routine.
         IndexError: If *rung_number* is out of range.
     """
+    logger.info("Deleting rung %d from %s/%s", rung_number, program_name, routine_name)
     routine = _find_routine(project, program_name, routine_name)
     rll_content = _find_rll_content(routine)
 
@@ -645,6 +654,7 @@ def modify_rung_text(
             has no ``Text`` child.
         IndexError: If *rung_number* is out of range.
     """
+    logger.info("Editing rung %d in %s/%s", rung_number, program_name, routine_name)
     routine = _find_routine(project, program_name, routine_name)
     rll_content = _find_rll_content(routine)
 

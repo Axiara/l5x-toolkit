@@ -23,6 +23,7 @@ Module XML structure::
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Optional
 
 from lxml import etree
@@ -35,6 +36,8 @@ from .utils import (
     set_description,
     validate_tag_name,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +239,7 @@ def set_module_address(
     Raises:
         KeyError: If the module or port is not found.
     """
+    logger.info("Updating address for module %r to %r", module_name, address)
     module = _find_module(project, module_name)
     ports = module.find("Ports")
     if ports is None:
@@ -326,6 +330,7 @@ def import_module(
         FileNotFoundError: If *template_path* does not exist.
         lxml.etree.XMLSyntaxError: If the template file is malformed XML.
     """
+    logger.info("Importing module from %r", template_path)
     validate_tag_name(name)
 
     # Check for duplicate name.
@@ -399,6 +404,7 @@ def delete_module(
         KeyError: If no module with the given name exists.
         ValueError: If attempting to delete the ``'Local'`` module.
     """
+    logger.info("Deleting module %r", name)
     if name.lower() == "local":
         raise ValueError(
             "Cannot delete the 'Local' module -- it represents the "

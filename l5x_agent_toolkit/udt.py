@@ -20,6 +20,7 @@ references the backing field via ``Target`` and ``BitNumber`` attributes.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from lxml import etree
@@ -36,6 +37,8 @@ from .utils import (
     insert_in_order,
     parse_l5x,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +277,7 @@ def import_udt(
             or if ``overwrite`` is False and the UDT already exists.
         etree.XMLSyntaxError: If the source file contains malformed XML.
     """
+    logger.info("Importing UDT from %r", file_path)
     source_root = parse_l5x(file_path)
 
     # Locate the DataType definition in the source file.
@@ -360,6 +364,7 @@ def get_udt_info(project, name: str) -> dict:
     Raises:
         ValueError: If the UDT is not found.
     """
+    logger.info("Querying UDT info for %r", name)
     udt_elem = _find_udt_element(project, name)
     if udt_elem is None:
         raise ValueError(f"UDT '{name}' not found in the project.")

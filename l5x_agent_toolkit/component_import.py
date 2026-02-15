@@ -20,6 +20,7 @@ Conflict resolution strategies:
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
@@ -38,6 +39,8 @@ from .utils import (
     insert_in_order,
     parse_l5x,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -1201,6 +1204,7 @@ def analyze_import(
         FileNotFoundError: If *file_path* does not exist.
         ValueError: If the file is not a valid L5X file.
     """
+    logger.info("Analyzing import from '%s'", file_path)
     source_root = parse_l5x(file_path)
     src_ctrl = _get_source_controller(source_root)
     target_type = _get_source_target_type(source_root)
@@ -1351,6 +1355,7 @@ def import_component(
         ValueError: If the file is not a valid L5X file or has an
             unsupported TargetType.
     """
+    logger.info("Importing component from '%s' with conflict_resolution='%s'", file_path, conflict_resolution)
     valid_resolutions = {'report', 'skip', 'overwrite', 'fail'}
     if conflict_resolution not in valid_resolutions:
         raise ValueError(

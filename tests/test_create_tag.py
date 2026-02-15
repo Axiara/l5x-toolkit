@@ -3,6 +3,7 @@
 import pytest
 from lxml import etree
 from l5x_agent_toolkit import tags
+from l5x_agent_toolkit.project import L5XProject
 from l5x_agent_toolkit.utils import validate_tag_name
 
 
@@ -66,6 +67,7 @@ class FakeProject:
     def get_aoi_element(self, n): raise KeyError(n)
     def get_data_type_definition(self, n): raise KeyError(n)
     def get_alarm_definition(self, n): return None
+    _parse_decorated_data = L5XProject._parse_decorated_data
     def is_safety_program(self, program_name):
         prog = self.get_program_element(program_name)
         return prog.get('Class', '') == 'Safety'
