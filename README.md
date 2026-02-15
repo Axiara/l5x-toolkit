@@ -58,46 +58,6 @@ This means you can describe PLC modifications in plain English ("create a DINT t
    python -c "from l5x_agent_toolkit import L5XProject; print('OK')"
    ```
 
-## Quick Start
-
-```python
-from l5x_agent_toolkit import L5XProject
-from l5x_agent_toolkit import tags, programs, validator
-
-# Load an existing project
-project = L5XProject(r'C:\Projects\MyMachine.L5X')
-
-# Inspect what is in the project
-summary = project.get_project_summary()
-print(f"Controller: {project.controller_name}")
-print(f"Programs: {summary['program_count']}, Tags: {summary['tag_count']}")
-
-# Create a controller-scope tag
-tags.create_tag(project, 'MotorSpeed', 'DINT', description='Speed setpoint RPM')
-tags.set_tag_value(project, 'MotorSpeed', 1750)
-
-# Create a program with a default MainRoutine
-programs.create_program(project, 'ConveyorControl', description='Zone 1 conveyor')
-
-# Add a rung to MainRoutine
-programs.add_rung(
-    project, 'ConveyorControl', 'MainRoutine',
-    'XIC(StartPB)OTE(MotorRun);',
-    comment='Start motor when pushbutton is pressed',
-)
-
-# Validate before saving
-result = validator.validate_project(project)
-if result.is_valid:
-    print("Validation passed")
-else:
-    for err in result.errors:
-        print(f"ERROR: {err}")
-
-# Save to a new file
-project.write(r'C:\Projects\MyMachine_modified.L5X')
-```
-
 ## MCP Server Setup
 
 ### What is MCP?
@@ -304,25 +264,6 @@ To remove it later:
 ```bash
 claude mcp remove l5x-toolkit
 ```
-
-## Sharing with Others
-
-To distribute the L5X Agent Toolkit to a coworker:
-
-1. **Copy the folder.** Copy the entire `C:\Tools\l5x-toolkit` folder to their machine at the same path (or any path they prefer).
-
-2. **Install dependencies.** Have them open a terminal and run:
-
-   ```bash
-   pip install lxml "mcp[cli]"
-   pip install -e "C:\Tools\l5x-toolkit"
-   ```
-
-3. **Add the MCP config.** Have them add the `l5x-toolkit` entry to their Claude Desktop config file (see [Configuration](#configuration) above) or run the `claude mcp add` command for Claude Code.
-
-4. **Restart Claude Desktop** (or start a new Claude Code session).
-
-That is all that is needed. There is no license server, no cloud service, and no account required. The toolkit runs entirely locally.
 
 ## Project Structure
 
