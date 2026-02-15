@@ -359,6 +359,8 @@ C:\Tools\l5x-toolkit
 
 ## License / Credits
 
-The L5X Agent Toolkit was built for internal use at CRG Automation. It uses the [lxml](https://lxml.de/) library for XML processing and the [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) for the Model Context Protocol server.
+MIT License. See [LICENSE](LICENSE) for details.
+
+The L5X Agent Toolkit was created by Megan Fox. It uses the [lxml](https://lxml.de/) library for XML processing and the [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) for the Model Context Protocol server.
 
 Rockwell Automation, Studio 5000, Logix Designer, and RSLogix 5000 are trademarks of Rockwell Automation, Inc. This toolkit is not affiliated with or endorsed by Rockwell Automation.
