@@ -2109,4 +2109,15 @@ def strip_l5k_data(
                     tag.remove(data_elem)
                     count += 1
 
+    # Update ExportOptions to remove L5KData flag so Studio 5000
+    # does not expect L5K data that is no longer present.
+    if count > 0:
+        root = project.root
+        export_opts = root.get('ExportOptions', '')
+        if 'L5KData' in export_opts:
+            new_opts = ' '.join(
+                opt for opt in export_opts.split() if opt != 'L5KData'
+            )
+            root.set('ExportOptions', new_opts)
+
     return count

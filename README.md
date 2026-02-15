@@ -6,22 +6,24 @@ AI-driven manipulation of Rockwell Automation Studio 5000 L5X project files.
 
 ## Overview
 
-The L5X Agent Toolkit is a Python library and MCP (Model Context Protocol) server that gives AI assistants -- such as Claude Desktop and Claude Code -- the ability to read, modify, and validate Rockwell Automation PLC project files in the `.L5X` format. Instead of an AI attempting to edit raw XML (which is fragile and error-prone), this toolkit exposes **42 validated tool functions** that produce structurally correct XML every time.
+The L5X Agent Toolkit is a Python library and MCP (Model Context Protocol) server that gives AI assistants -- such as Claude Desktop and Claude Code -- the ability to read, modify, and validate Rockwell Automation PLC project files in the `.L5X` format. Instead of an AI attempting to edit raw XML (which is fragile and error-prone), this toolkit exposes **31 validated tool functions** that produce structurally correct XML every time.
 
-The core design principle is simple: **the AI never touches raw XML**. Every operation -- creating tags, adding rungs, importing Add-On Instructions, configuring modules -- goes through a validated function that understands L5X schema rules, CDATA encoding, dual data format synchronization (L5K and Decorated), and Studio 5000's import requirements.
+The core design principle is simple: **the AI never touches raw XML**. Every operation -- creating tags, adding rungs, importing components, configuring alarms -- goes through a validated function that understands L5X schema rules, CDATA encoding, dual data format synchronization (L5K and Decorated), and Studio 5000's import requirements.
 
 This means you can describe PLC modifications in plain English ("create a DINT tag called MotorSpeed with a default value of 1750") and the toolkit translates that into byte-perfect L5X XML that Studio 5000 Logix Designer will accept without errors.
 
 ## Features
 
-- **42 MCP tools** covering project management, tag CRUD, program/routine operations, rung manipulation, AOI/UDT import, module configuration, validation, and analysis
+- **31 consolidated MCP tools** covering project management, tag CRUD, program/routine operations, rung manipulation, component import/export, alarm management, validation, and cross-reference analysis
+- **Batch operations** -- tag creation, rung manipulation, alarm configuration, and tag updates accept arrays of operations in a single call for efficient bulk changes
 - **Dual data format synchronization** -- automatically generates both L5K (compact text) and Decorated (structured XML) representations, keeping them in sync so Studio 5000 does not crash on import
+- **L5K data stripping** -- safely removes L5K data when it may be out of sync, and automatically updates the ExportOptions header so Studio 5000 does not expect data that is no longer present
 - **Rung text parser and validator** -- tokenizes, parses, and validates Relay Ladder Logic instruction text with full support for branches, nested AOI calls, and tag member/array references
 - **Tag substitution engine** -- duplicate rungs with tag name replacements for bulk logic generation (e.g., duplicating conveyor logic for multiple zones)
-- **AOI and UDT import with dependency resolution** -- automatically imports transitive dependencies (UDTs referenced by AOIs, UDTs referenced by other UDTs) and updates EditedDate timestamps
-- **Module import from templates** -- import I/O module definitions from template L5X files with configurable name, address, slot, and parent module
+- **Unified component import/export** -- import and export programs, routines, rungs, tags, AOIs, UDTs, and modules with automatic conflict detection, dependency resolution, and configurable conflict handling (report, skip, overwrite, or fail)
+- **Alarm management** -- create and configure ALARM_DIGITAL tags, inspect alarm conditions, and manage DatatypeAlarmDefinitions for UDTs and AOIs
+- **Cross-reference analysis** -- find tag references across programs, analyze scope dependencies, compare structured tag instances for duplicates, and detect conflicts like tag shadowing and unused tags
 - **Comprehensive validation** -- checks structure, references, naming conventions, rung syntax, AOI timestamps, task scheduling, and data format completeness before writing
-- **Cross-reference search** -- find every rung and routine where a tag is used
 - **No external dependencies beyond `lxml`** -- the toolkit uses only `lxml` and the Python standard library (plus `mcp[cli]` for the MCP server)
 - **Works with Python 3.9+** on Windows, macOS, and Linux
 
@@ -60,7 +62,7 @@ This means you can describe PLC modifications in plain English ("create a DINT t
 
 ```python
 from l5x_agent_toolkit import L5XProject
-from l5x_agent_toolkit import tags, programs, rungs, validator
+from l5x_agent_toolkit import tags, programs, validator
 
 # Load an existing project
 project = L5XProject(r'C:\Projects\MyMachine.L5X')
@@ -100,7 +102,7 @@ project.write(r'C:\Projects\MyMachine_modified.L5X')
 
 ### What is MCP?
 
-The [Model Context Protocol (MCP)](https://modelcontextprotocol.io) is an open standard that lets AI assistants call external tools through a structured JSON-RPC interface over stdio. When you connect the L5X Agent Toolkit as an MCP server, Claude can directly invoke any of the 42 tools -- loading projects, creating tags, adding rungs, validating, and saving -- all through natural language conversation. You describe what you want in plain English, and Claude translates your intent into the correct sequence of tool calls.
+The [Model Context Protocol (MCP)](https://modelcontextprotocol.io) is an open standard that lets AI assistants call external tools through a structured JSON-RPC interface over stdio. When you connect the L5X Agent Toolkit as an MCP server, Claude can directly invoke any of the 31 tools -- loading projects, creating tags, adding rungs, validating, and saving -- all through natural language conversation. You describe what you want in plain English, and Claude translates your intent into the correct sequence of tool calls.
 
 ### Claude Desktop setup
 
@@ -145,7 +147,7 @@ After restarting Claude Desktop (or starting a new Claude Code session), ask Cla
 
 > "What L5X tools do you have available?"
 
-Claude should list the toolkit tools (load_project, create_tag, add_rung, etc.). If it does not, check:
+Claude should list the toolkit tools (load_project, manage_tags, manage_rungs, etc.). If it does not, check:
 
 - That `python` is on your system PATH
 - That `pip install -e "C:\Tools\l5x-toolkit"` completed without errors
@@ -166,229 +168,85 @@ Here is what a typical interaction looks like once the MCP server is connected:
 >
 > **You:** Add a DINT tag called PalletizerState to controller scope, then add a rung in PalletizerControl/MainRoutine that sets it to 1 when StartPB is pressed.
 >
-> **Claude:** *(calls `create_tag`, then `add_rung`)* Created the tag and added the rung: `XIC(StartPB)MOV(1,PalletizerState);`
+> **Claude:** *(calls `manage_tags`, then `manage_rungs`)* Created the tag and added the rung: `XIC(StartPB)MOV(1,PalletizerState);`
 >
 > **You:** Validate and save to C:\Projects\Line4_updated.L5X
 >
 > **Claude:** *(calls `validate_project`, then `save_project`)* Validation passed with 0 errors and 0 warnings. Saved to C:\Projects\Line4_updated.L5X.
 
-## API Reference
-
-### project.py -- L5XProject class
-
-| Method | Description |
-|--------|-------------|
-| `L5XProject(file_path)` | Load an L5X file into memory (or create an empty model if `file_path` is `None`) |
-| `load(file_path)` | Load (or reload) an L5X file |
-| `write(file_path)` | Write the project to an L5X file with CDATA sections preserved |
-| `controller_name` | Property: the controller name string |
-| `processor_type` | Property: the processor catalog number (e.g., `1756-L83E`) |
-| `firmware_version` | Property: firmware revision string |
-| `get_project_summary()` | Return a dict with counts of programs, tags, AOIs, UDTs, modules, and tasks |
-| `list_programs()` | List all program names |
-| `list_routines(program_name)` | List routines in a program with their types |
-| `list_controller_tags()` | List all controller-scope tags with name, data type, and description |
-| `list_program_tags(program_name)` | List all tags in a specific program |
-| `list_modules()` | List all I/O modules |
-| `list_aois()` | List all Add-On Instruction definitions |
-| `list_udts()` | List all User-Defined Types |
-| `list_tasks()` | List all tasks with type, priority, rate, and scheduled programs |
-| `get_all_rungs(program_name, routine_name)` | Get all rungs with text and comments |
-| `get_tag_value(tag_name, scope, program_name)` | Get a tag's current value |
-| `get_tag_member_value(tag_name, member_path, scope, program_name)` | Get a structured tag member's value |
-| `find_tag_references(tag_name)` | Find all rungs/routines referencing a tag |
-| `find_unused_tags(scope, program_name)` | Find tags not referenced in any rung |
-| `get_program_element(program_name)` | Get the raw XML element for a program |
-| `get_routine_element(program_name, routine_name)` | Get the raw XML element for a routine |
-| `get_data_type_definition(type_name)` | Get the XML element for a UDT or AOI definition |
-
-### tags.py
-
-| Function | Description |
-|----------|-------------|
-| `create_tag(project, name, data_type, ...)` | Create a new tag with full L5K and Decorated data |
-| `delete_tag(project, name, scope, program_name)` | Delete a tag from the project |
-| `rename_tag(project, old_name, new_name, ...)` | Rename a tag, optionally updating all rung references |
-| `copy_tag(project, name, new_name, ...)` | Deep-copy a tag with a new name |
-| `move_tag(project, name, from_scope, to_scope, ...)` | Move a tag between controller and program scope |
-| `set_tag_value(project, name, value, ...)` | Set a scalar tag's value (syncs both data formats) |
-| `set_tag_member_value(project, name, member_path, value, ...)` | Set a member value in a structured or array tag |
-| `set_tag_description(project, name, description, ...)` | Set or update a tag's description text |
-| `get_tag_info(project, name, ...)` | Get detailed tag information (type, value, dimensions, etc.) |
-| `tag_exists(project, name, scope, program_name)` | Check whether a tag exists |
-| `batch_create_tags(project, specs, scope, program_name)` | Create multiple tags from a list of specification dicts |
-
-### programs.py
-
-| Function | Description |
-|----------|-------------|
-| `create_program(project, name, description)` | Create a new program with a default MainRoutine |
-| `delete_program(project, name)` | Delete a program and unschedule it from all tasks |
-| `create_routine(project, program_name, routine_name, routine_type)` | Create a new routine (RLL, ST, FBD, or SFC) |
-| `delete_routine(project, program_name, routine_name)` | Delete a routine from a program |
-| `add_rung(project, program_name, routine_name, text, comment, position)` | Add a rung to an RLL routine |
-| `delete_rung(project, program_name, routine_name, rung_number)` | Delete a rung by index |
-| `modify_rung_text(project, program_name, routine_name, rung_number, new_text)` | Replace the instruction text of an existing rung |
-| `set_rung_comment(project, program_name, routine_name, rung_number, comment)` | Set or update a rung comment |
-| `copy_rung(project, program_name, routine_name, rung_number, position)` | Copy a rung to another position |
-| `duplicate_rung_with_substitution(project, ..., substitutions, new_comment)` | Duplicate a rung with tag name replacements |
-| `add_st_line(project, program_name, routine_name, text)` | Add a line of Structured Text |
-| `set_st_content(project, program_name, routine_name, lines)` | Replace all Structured Text content |
-| `add_jsr_rung(project, program_name, routine_name, target_routine, ...)` | Add a JSR (Jump to Subroutine) rung |
-| `schedule_program(project, task_name, program_name)` | Schedule a program under a task |
-| `unschedule_program(project, task_name, program_name)` | Remove a program from a task's schedule |
-
-### rungs.py
-
-| Function / Class | Description |
-|------------------|-------------|
-| `tokenize(rung_text)` | Tokenize rung instruction text into a flat list of `Token` objects |
-| `parse_rung(rung_text, comment)` | Parse rung text into a structured `Rung` AST with `InstructionCall` and `Branch` nodes |
-| `validate_rung_syntax(rung_text)` | Check bracket matching, semicolon termination, and parenthesis balance |
-| `validate_rung_references(rung_text, available_tags)` | Check that all referenced tags exist in a given set |
-| `extract_tag_references(rung_text)` | Extract all unique base tag names referenced in rung text |
-| `substitute_tags(rung_text, substitutions)` | Replace tag names with word-boundary-safe substitution |
-| `build_rung_text(instructions, comment)` | Construct valid rung text from one or more instruction strings |
-| `TokenType` | Enum of token types: INSTRUCTION, TAG_REFERENCE, LITERAL, OPEN_BRACKET, etc. |
-| `Token` | Dataclass: a single lexical token with `type` and `value` |
-| `InstructionCall` | Dataclass: an instruction with `name` and `arguments` |
-| `Branch` | Dataclass: parallel OR logic with a list of `paths` |
-| `Rung` | Dataclass: a fully parsed rung with `elements` and `comment` |
-
-### modules.py
-
-| Function | Description |
-|----------|-------------|
-| `list_modules(project)` | List all modules with catalog numbers, parent info, and inhibit state |
-| `get_module_info(project, name)` | Get detailed module info including ports, description, and EKey state |
-| `set_module_address(project, module_name, port_id, address)` | Set the address (IP or slot) on a specific port |
-| `set_module_inhibited(project, module_name, inhibited)` | Enable or disable module inhibit |
-| `import_module(project, template_path, name, ...)` | Import a module from a template L5X file with configurable identity |
-| `delete_module(project, name)` | Delete a module (cannot delete 'Local') |
-
-### aoi.py
-
-| Function | Description |
-|----------|-------------|
-| `import_aoi(project, file_path, overwrite)` | Import an AOI from an L5X export file with automatic dependency resolution |
-| `get_aoi_info(project, name)` | Get full AOI metadata: revision, parameters, local tags, routines |
-| `get_aoi_parameters(project, name)` | Get the parameter list with types, usage, required flag, and defaults |
-| `list_aoi_dependencies(project, name)` | List UDTs and other AOIs this AOI depends on |
-| `generate_aoi_call_text(project, aoi_name, instance_tag, param_map)` | Generate rung instruction text for calling an AOI |
-
-### udt.py
-
-| Function | Description |
-|----------|-------------|
-| `import_udt(project, file_path, overwrite)` | Import a UDT from an L5X export file with transitive dependency resolution |
-| `get_udt_info(project, name)` | Get full UDT metadata: family, class, description, and all members |
-| `get_udt_members(project, name)` | Get visible (non-hidden) members only |
-| `get_udt_all_members(project, name)` | Get all members including hidden BOOL backing fields |
-| `list_udt_dependencies(project, name)` | List other UDTs referenced in member definitions |
-
-### validator.py
-
-| Function / Class | Description |
-|------------------|-------------|
-| `validate_project(project)` | Run all validation checks and return an aggregated `ValidationResult` |
-| `validate_structure(project)` | Check required XML elements and hierarchy |
-| `validate_references(project)` | Check tag references in rungs against defined tags |
-| `validate_tag(project, tag_element)` | Validate a single tag element (name, type, data format) |
-| `validate_rung(rung_text)` | Validate a single rung's syntax |
-| `validate_naming(project)` | Check naming conventions for tags, programs, and routines |
-| `ValidationResult` | Container with `errors`, `warnings`, `is_valid`, `add_error()`, `add_warning()`, `merge()` |
-
-### data_format.py
-
-| Function | Description |
-|----------|-------------|
-| `get_default_radix(data_type)` | Return the default display radix for a data type |
-| `scalar_to_l5k(data_type, value)` | Convert a Python value to L5K format string |
-| `scalar_to_decorated_value(data_type, value, radix)` | Convert a Python value to Decorated XML Value attribute string |
-| `generate_default_l5k(data_type, dimensions, project)` | Generate the default L5K data text for a tag |
-| `generate_default_decorated(data_type, dimensions, radix, project)` | Generate the default Decorated XML element tree for a tag |
-| `generate_tag_data_elements(data_type, dimensions, radix, project)` | Generate both `<Data Format="L5K">` and `<Data Format="Decorated">` elements |
-
 ## MCP Tools Reference
 
-All 42 tools exposed by the MCP server, grouped by category. Every tool returns a string result (JSON for queries, a confirmation message for mutations).
+All 31 tools exposed by the MCP server, grouped by category. Every tool returns a string result (JSON for queries, a confirmation message for mutations). Batch tools accept JSON arrays of operations for efficient bulk changes.
 
-### Project Management (3 tools)
+### Project Management (5 tools)
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `load_project` | `file_path` | Load an L5X file into memory. **Must be called first.** |
-| `save_project` | `file_path` (optional) | Save the project. Omit path to overwrite the original. |
-| `get_project_summary` | *(none)* | Get counts of programs, tags, AOIs, UDTs, modules, and tasks. |
+| Tool | Description |
+|------|-------------|
+| `load_project` | Load an L5X file into memory. **Must be called first.** |
+| `save_project` | Save the project to an L5X file. Omit path to overwrite the original. |
+| `format_project` | Pretty-print the loaded project XML with consistent indentation. |
+| `strip_l5k_data` | Remove L5K data from tags, keeping only Decorated format. Automatically updates the ExportOptions header. Use when L5K data may be out of sync with Decorated data. |
+| `get_project_summary` | Get counts of programs, tags, AOIs, UDTs, modules, and tasks. |
 
-### Query Tools (10 tools)
+### Query Tools (3 tools)
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `list_programs` | *(none)* | List all program names. |
-| `list_routines` | `program_name` | List routines in a program with their types. |
-| `list_controller_tags` | *(none)* | List all controller-scope tags. |
-| `list_program_tags` | `program_name` | List all tags in a specific program. |
-| `list_modules` | *(none)* | List all I/O modules with catalog numbers. |
-| `list_aois` | *(none)* | List all Add-On Instruction definitions. |
-| `list_udts` | *(none)* | List all User-Defined Types. |
-| `list_tasks` | *(none)* | List all tasks with type, priority, and scheduled programs. |
-| `get_all_rungs` | `program_name`, `routine_name` | Get all rungs with text and comments. |
-| `get_tag_info` | `name`, `scope`, `program_name` | Get detailed info about a specific tag. |
+| Tool | Description |
+|------|-------------|
+| `query_project` | Query project contents -- programs, tags, modules, AOIs, UDTs, tasks. Supports entity filtering, glob patterns, pagination (limit/offset), and scope filtering. Replaces the former list_programs, list_routines, list_controller_tags, list_program_tags, list_modules, list_aois, list_udts, list_tasks tools. |
+| `get_entity_info` | Get detailed information about a specific tag, AOI, UDT, or rung. Supports optional includes: value, references, alarm_conditions, parameters, members. Replaces the former get_tag_info, find_tag, get_aoi_info, get_udt_info tools. |
+| `get_all_rungs` | Get rungs in an RLL routine with their text and comments. Supports pagination with start/count. |
 
-### Tag Operations (7 tools)
+### Tag Operations (2 batch tools)
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `create_tag` | `name`, `data_type`, `scope`, `program_name`, `dimensions`, `description`, `radix` | Create a new tag (BOOL, DINT, REAL, TIMER, UDT, array, etc.). |
-| `delete_tag` | `name`, `scope`, `program_name` | Delete a tag. |
-| `rename_tag` | `old_name`, `new_name`, `scope`, `program_name`, `update_references` | Rename a tag, optionally updating all rung references. |
-| `set_tag_value` | `name`, `value`, `scope`, `program_name` | Set a scalar tag's value. |
-| `set_tag_member_value` | `name`, `member_path`, `value`, `scope`, `program_name` | Set a member value in a structured/array tag (e.g., `Timer1.PRE`). |
-| `set_tag_description` | `name`, `description`, `scope`, `program_name` | Set or update a tag's description. |
-| `batch_create_tags` | `tag_specs_json`, `scope`, `program_name` | Create multiple tags from a JSON array of specs. |
+| Tool | Description |
+|------|-------------|
+| `manage_tags` | Execute one or more tag CRUD operations in sequence. Actions: create, delete, rename, copy, move, create_alias. Replaces the former create_tag, delete_tag, rename_tag, copy_tag, move_tag, batch_create_tags, create_alias_tag tools. |
+| `update_tags` | Set values, member values, and descriptions on one or more tags in a single call. Replaces the former set_tag_value, set_tag_member_value, set_tag_description tools. |
 
-### Program and Routine Operations (10 tools)
+### Program and Routine Operations (5 tools)
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `create_program` | `name`, `description` | Create a program with a default MainRoutine. |
-| `delete_program` | `name` | Delete a program and unschedule from all tasks. |
-| `create_routine` | `program_name`, `routine_name`, `routine_type` | Create a routine (RLL, ST, FBD, or SFC). |
-| `add_rung` | `program_name`, `routine_name`, `instruction_text`, `comment`, `position` | Add a rung to an RLL routine. |
-| `delete_rung` | `program_name`, `routine_name`, `rung_number` | Delete a rung by index. |
-| `modify_rung_text` | `program_name`, `routine_name`, `rung_number`, `new_text` | Replace a rung's instruction text. |
-| `set_rung_comment` | `program_name`, `routine_name`, `rung_number`, `comment` | Set or update a rung comment. |
-| `duplicate_rung_with_substitution` | `program_name`, `routine_name`, `rung_number`, `substitutions_json`, `comment` | Duplicate a rung with tag name replacements. |
-| `schedule_program` | `task_name`, `program_name` | Schedule a program under a task. |
-| `unschedule_program` | `task_name`, `program_name` | Remove a program from a task's schedule. |
+| Tool | Description |
+|------|-------------|
+| `create_program` | Create a new program with a default MainRoutine. |
+| `delete_program` | Delete a program and unschedule it from all tasks. |
+| `create_routine` | Create a new routine in a program (RLL, ST, FBD, or SFC). |
+| `manage_rungs` | Execute one or more rung operations in sequence. Actions: add, delete, modify, duplicate. Automatically adjusts indices for insertions/deletions within the same batch. Replaces the former add_rung, delete_rung, modify_rung_text, set_rung_comment, duplicate_rung_with_substitution tools. |
+| `schedule_program` / `unschedule_program` | Schedule or remove a program from a task. |
 
-### Import Operations (3 tools)
+### Import and Export (4 tools)
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `import_aoi` | `file_path`, `overwrite` | Import an AOI from an L5X file with automatic dependency resolution. |
-| `import_udt` | `file_path`, `overwrite` | Import a UDT from an L5X file with transitive dependency resolution. |
-| `import_module` | `template_path`, `name`, `parent_module`, `address`, `slot`, `description` | Import a module from a template L5X file. |
+| Tool | Description |
+|------|-------------|
+| `import_component` | Import a component export file (rung, routine, program, AOI, UDT, or module) with conflict detection and configurable resolution (report, skip, overwrite, fail). Replaces the former import_aoi, import_udt, import_module tools. |
+| `analyze_import` | Dry-run conflict analysis for a component export file without making changes. |
+| `create_export_shell` | Create an empty export shell in memory (rung, routine, or program). Replaces the former create_rung_export, create_routine_export, create_program_export tools. |
+| `export_component` | Extract a component (rung, routine, program, tag, UDT, or AOI) into a standalone L5X export file. Replaces the former export_rung, export_routine, export_program, export_tag, export_udt, export_aoi tools. |
 
-### Analysis Tools (5 tools)
+### Alarm Management (3 tools)
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `get_aoi_info` | `name` | Get full AOI details: revision, parameters, local tags, routines. |
-| `get_aoi_parameters` | `name` | Get the AOI parameter list with types, usage, and defaults. |
-| `get_udt_info` | `name` | Get full UDT details: family, class, description, and members. |
-| `get_udt_members` | `name` | Get visible (non-hidden) members of a UDT. |
-| `find_tag_references` | `tag_name` | Find all rungs/routines where a tag is referenced. |
+| Tool | Description |
+|------|-------------|
+| `manage_alarms` | Create, configure, and inspect alarm tags in a single call. Actions: create_digital, configure_digital, get_info, get_conditions, configure_condition. Replaces the former create_alarm_digital_tag, batch_create_alarm_digital_tags, get_alarm_digital_info, configure_alarm_digital_tag tools. |
+| `manage_alarm_definitions` | Manage DatatypeAlarmDefinitions for UDTs and AOIs. Actions: list, create, remove, get. |
+| `list_alarms` | List all alarm tags and alarm conditions in the project. Filter by type (digital, analog, condition) and scope. |
+
+### Analysis and Cross-Reference (5 tools)
+
+| Tool | Description |
+|------|-------------|
+| `find_tag_references` | Find all rungs/routines where a specific tag is referenced. |
+| `get_scope_references` | Return all tags and AOI instances referenced within a program or routine scope. Answers "what does this routine touch?" |
+| `find_references` | Batch reverse-lookup: find where multiple tags, AOIs, or UDTs are referenced across the project. |
+| `get_tag_values` | Get values and metadata for one or more tags in a single call. Supports glob patterns, member expansion, and AOI parameter context. |
+| `compare_tag_instances` | Compare structured tag instances to find duplicates across specified members. Works with any data type (AOIs, UDTs, built-in types). |
 
 ### Validation and Utilities (4 tools)
 
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `validate_project` | *(none)* | Run all validation checks (structure, references, naming, rung syntax, etc.). |
-| `validate_rung_syntax` | `rung_text` | Check if a rung instruction string is syntactically valid. |
-| `substitute_tags_in_rung` | `rung_text`, `substitutions_json` | Replace tag names in rung text with word-boundary-safe substitution. |
-| `extract_tag_references_from_rung` | `rung_text` | Extract all base tag names referenced in rung text. |
+| Tool | Description |
+|------|-------------|
+| `validate_project` | Run all validation checks: structure, references, naming, dependencies, modules, tasks, rung syntax, AOI timestamps, and data format completeness. |
+| `analyze_rung_text` | Analyze, validate, or transform rung instruction text. Actions: validate, extract_tags, substitute. Replaces the former validate_rung_syntax, substitute_tags_in_rung, extract_tag_references_from_rung tools. |
+| `detect_conflicts` | Detect potential conflicts: tag shadowing, unused tags, scope duplicates. |
 
 ## Configuration
 
@@ -469,24 +327,34 @@ That is all that is needed. There is no license server, no cloud service, and no
 ## Project Structure
 
 ```
-C:\Tools\l5x-toolkit\n|-- setup.py                          # Package metadata and entry points
+C:\Tools\l5x-toolkit
+|-- setup.py                          # Package metadata and entry points
 |-- README.md                         # This file
 |-- l5x_agent_toolkit/
 |   |-- __init__.py                   # Package init with lazy L5XProject import
 |   |-- project.py                    # L5XProject class: load, write, query, navigate
-|   |-- tags.py                       # Tag CRUD: create, delete, rename, copy, move, set value
+|   |-- mcp_server.py                 # MCP server exposing 31 consolidated tools over stdio
+|   |-- tags.py                       # Tag CRUD, batch updates, value sync, L5K stripping
 |   |-- programs.py                   # Program/routine CRUD and rung operations
 |   |-- rungs.py                      # Rung tokenizer, parser, validator, and tag substitution
 |   |-- modules.py                    # I/O module list, inspect, import, configure, delete
 |   |-- aoi.py                        # AOI import, query, dependency analysis, call generation
-|   |-- udt.py                        # UDT import, query, member inspection, dependency analysis
+|   |-- udt.py                       # UDT import, query, member inspection, dependency analysis
+|   |-- component_import.py           # Unified component import with conflict detection
+|   |-- component_export.py           # Component export and export shell generation
 |   |-- validator.py                  # Pre-flight validation engine (structure, refs, naming, etc.)
 |   |-- data_format.py               # L5K and Decorated data format generation and sync
+|   |-- accessors.py                  # Tag and data type accessor utilities
+|   |-- models.py                     # Data models and type definitions
 |   |-- schema.py                     # Constants: base types, built-in structures, instruction catalog
 |   |-- utils.py                      # Shared XML helpers: CDATA, deep copy, element ordering
-|   |-- mcp_server.py                 # MCP server exposing all 42 tools over stdio
 |-- tests/
-    |-- __init__.py                   # Test package init
+    |-- __init__.py
+    |-- test_alarm.py                 # Alarm tag and alarm definition tests
+    |-- test_aoi.py                   # AOI import and query tests
+    |-- test_create_tag.py            # Tag creation and data format tests
+    |-- test_data_format.py           # L5K/Decorated format generation tests
+    |-- test_mcp_server.py            # MCP server integration tests
 ```
 
 ## License / Credits
