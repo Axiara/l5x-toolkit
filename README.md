@@ -21,7 +21,7 @@ This means you can describe PLC modifications in plain English ("create a DINT t
 - **Rung text parser and validator** -- tokenizes, parses, and validates Relay Ladder Logic instruction text with full support for branches, nested AOI calls, and tag member/array references
 - **Tag substitution engine** -- duplicate rungs with tag name replacements for bulk logic generation (e.g., duplicating conveyor logic for multiple zones)
 - **Unified component import/export** -- import and export programs, routines, rungs, tags, AOIs, UDTs, and modules with automatic conflict detection, dependency resolution, and configurable conflict handling (report, skip, overwrite, or fail)
-- **Alarm management** -- create and configure ALARM_DIGITAL tags, inspect alarm conditions, and manage DatatypeAlarmDefinitions for UDTs and AOIs
+- **Alarm management** -- create and configure tag based alarms, inspect alarm conditions, and manage Alarm Definitions for UDTs and AOIs
 - **Cross-reference analysis** -- find tag references across programs, analyze scope dependencies, compare structured tag instances for duplicates, and detect conflicts like tag shadowing and unused tags
 - **Comprehensive validation** -- checks structure, references, naming conventions, rung syntax, AOI timestamps, task scheduling, and data format completeness before writing
 - **No external dependencies beyond `lxml`** -- the toolkit uses only `lxml` and the Python standard library (plus `mcp[cli]` for the MCP server)
